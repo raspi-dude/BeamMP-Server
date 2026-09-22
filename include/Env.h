@@ -24,6 +24,7 @@ namespace Env {
 
 enum class Key {
     MAX_CONCURRENT_CONNECTIONS,
+    MOD_HASH_BUFFER_SIZE,
     // provider settings
     PROVIDER_UPDATE_MESSAGE,
     PROVIDER_DISABLE_CONFIG,

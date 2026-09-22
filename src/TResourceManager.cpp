@@ -18,15 +18,46 @@
 
 #include "TResourceManager.h"
 #include "Common.h"
+#include "Env.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fmt/core.h>
 #include <ios>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
+#include <string>
 
 namespace fs = std::filesystem;
+
+namespace {
+// The default read buffer used while hashing mod files. Larger sequential reads
+// are far more efficient on HDD-backed servers than the old 4 KiB buffer, while
+// keeping memory usage bounded for many/large mods. Can be overridden at runtime
+// via the BEAMMP_MOD_HASH_BUFFER_SIZE environment variable (in bytes).
+constexpr size_t DefaultHashBufferSize = 256 * 1024;
+// Never allow a buffer smaller than the old 4 KiB, as that would only regress I/O.
+constexpr size_t MinHashBufferSize = 4096;
+
+size_t GetHashBufferSize() {
+    auto MaybeSize = Env::Get(Env::Key::MOD_HASH_BUFFER_SIZE);
+    if (!MaybeSize) {
+        return DefaultHashBufferSize;
+    }
+    try {
+        const size_t Size = static_cast<size_t>(std::stoull(MaybeSize.value()));
+        if (Size < MinHashBufferSize) {
+            beammp_warnf("BEAMMP_MOD_HASH_BUFFER_SIZE is too small ({}), using default of {} bytes", MaybeSize.value(), DefaultHashBufferSize);
+            return DefaultHashBufferSize;
+        }
+        return Size;
+    } catch (const std::exception&) {
+        beammp_warnf("Failed to parse BEAMMP_MOD_HASH_BUFFER_SIZE ('{}'), using default of {} bytes", MaybeSize.value(), DefaultHashBufferSize);
+        return DefaultHashBufferSize;
+    }
+}
+} // namespace
 
 TResourceManager::TResourceManager() {
     Application::SetSubsystemStatus("ResourceManager", Application::Status::Starting);
@@ -77,6 +108,8 @@ void TResourceManager::RefreshFiles() {
             beammp_errorf("Failed to load mods.json: {}", e.what());
         }
     }
+
+    const size_t HashBufferSize = GetHashBufferSize();
 
     for (const auto& entry : fs::directory_iterator(Path)) {
         std::string File(entry.path().string());
@@ -134,7 +167,7 @@ void TResourceManager::RefreshFiles() {
             size_t Read = 0;
             std::vector<char> Data;
             while (Read < FileSize) {
-                Data.resize(size_t(std::min<size_t>(FileSize - Read, 4096)));
+                Data.resize(size_t(std::min<size_t>(FileSize - Read, HashBufferSize)));
                 size_t RealDataSize = Data.size();
                 stream.read(Data.data(), std::streamsize(Data.size()));
                 if (stream.eof() || stream.fail()) {

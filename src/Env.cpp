@@ -47,6 +47,8 @@ std::string_view Env::ToString(Env::Key key) {
         break;
     case Key::MAX_CONCURRENT_CONNECTIONS:
         return "BEAMMP_MAX_CONCURRENT_CONNECTIONS";
+    case Key::MOD_HASH_BUFFER_SIZE:
+        return "BEAMMP_MOD_HASH_BUFFER_SIZE";
         break;
     }
     return "";
