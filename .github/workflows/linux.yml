@@ -26,10 +26,6 @@ jobs:
             version: 12
           - distro: debian
             version: 13
-          - distro: ubuntu
-            version: 22.04
-          - distro: ubuntu
-            version: 24.04
     container:
       image: ${{ matrix.distro }}:${{ matrix.version }}
     steps:
@@ -98,10 +94,6 @@ jobs:
             version: 12
           - distro: debian
             version: 13
-          - distro: ubuntu
-            version: 22.04
-          - distro: ubuntu
-            version: 24.04
     container:
       image: ${{ matrix.distro }}:${{ matrix.version }}
     steps:

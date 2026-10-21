@@ -29,8 +29,7 @@ jobs:
           prerelease: true
           body: |
             Files included in this release are:
-            - `BeamMP-Server.$DISTRO.$DISTROVERSION.$ARCH` for linux builds, for example `BeamMP-Server.debian.11.x86_64` for the Debian 11 build for x86_64. All require `liblua5.3` to be installed.
-            - `BeamMP-Server.exe` for the Windows build (x86_64). You need to install the [Visual C++ Redistributables](https://aka.ms/vs/17/release/vc_redist.x64.exe) to run this.
+            - `BeamMP-Server.$DISTRO.$DISTROVERSION.$ARCH` for linux builds, for example `BeamMP-Server.debian.12.x86_64` for the Debian 12 build for x86_64. All require `liblua5.3` to be installed.
 
   x86_64-matrix:
     runs-on: ubuntu-22.04
@@ -42,10 +41,6 @@ jobs:
             version: 12
           - distro: debian
             version: 13
-          - distro: ubuntu
-            version: 22.04
-          - distro: ubuntu
-            version: 24.04
     container:
       image: ${{ matrix.distro }}:${{ matrix.version }}
     steps:
@@ -53,7 +48,7 @@ jobs:
         uses: lukka/get-cmake@v3.28.1
 
       - name: Export GitHub Actions cache environment variables
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
@@ -64,7 +59,7 @@ jobs:
           apt-get update -y
           apt-get install -y git
 
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         with:
           submodules: "recursive"
           fetch-depth: 0
@@ -114,10 +109,6 @@ jobs:
             version: 12
           - distro: debian
             version: 13
-          - distro: ubuntu
-            version: 22.04
-          - distro: ubuntu
-            version: 24.04
     env:
       VCPKG_DEFAULT_TRIPLET: "arm64-linux"
       VCPKG_FORCE_SYSTEM_BINARIES: 1
@@ -128,7 +119,7 @@ jobs:
         uses: lukka/get-cmake@v3.28.1
 
       - name: Export GitHub Actions cache environment variables
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
@@ -139,7 +130,7 @@ jobs:
           apt-get update -y
           apt-get install -y git
 
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         with:
           submodules: "recursive"
           fetch-depth: 0
@@ -178,41 +169,3 @@ jobs:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: ./bin/BeamMP-Server.debug
           asset_content_type: application/x-elf
-
-  upload-release-files-windows:
-    name: Build and upload Windows Release Files
-    runs-on: windows-latest
-    needs: create-release
-    env:
-      VCPKG_DEFAULT_TRIPLET: x64-windows-static
-    steps:
-      - name: Export GitHub Actions cache environment variables
-        uses: actions/github-script@v6
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
-      - uses: actions/checkout@v2
-        with:
-          submodules: "recursive"
-          fetch-depth: 0
-
-      - name: Create Build Environment
-        shell: bash
-        run: ./scripts/windows/1-configure.sh
-
-      - name: Build Server
-        shell: bash
-        run: bash ./scripts/windows/2-build.sh
-
-      - name: Upload Release Asset
-        id: upload-release-asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./bin/Release/BeamMP-Server.exe
-          asset_name: BeamMP-Server.exe
-          asset_content_type: application/vnd.microsoft.portable-executable
