@@ -76,6 +76,49 @@ Environment variables:
 | `HOST` | `0.0.0.0` | Bind address |
 | `DATA_FILE` | `data/pairings.json` | Persisted pairings (hashes only, no codes) |
 | `DISCORD_GUILD_ID` | unset | Register slash commands in one guild (instant, for testing) |
+| `RELAY_PUBLIC_URL` | `config.json` | Overrides `publicUrl` |
+| `RELAY_ALLOWED_IPS` | `config.json` | Overrides `allowedIps`, comma separated |
+| `RELAY_TRUST_PROXY` | `config.json` | Overrides `trustProxy` (`true`/`false`) |
+
+## Configuration (`relay/config.json`)
+
+```json
+{
+  "http": { "host": "0.0.0.0", "port": 8099 },
+  "publicUrl": "https://relay.example.com",
+  "allowedIps": ["203.0.113.7", "198.51.100.0/24"],
+  "trustProxy": false,
+  "rateLimit": {
+    "perPairing": { "windowSeconds": 10, "maxMessages": 30 },
+    "perIp": { "windowSeconds": 60, "maxRequests": 600 }
+  },
+  "dataFile": "data/pairings.json"
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `publicUrl` | The URL `/pair` prints for `RelayUrl`. Without it the reply contains a placeholder. |
+| `allowedIps` | IPs or CIDR blocks allowed to use the relay. **Empty means any IP may connect** and the relay logs a warning at startup. IPv4-mapped addresses (`::ffff:1.2.3.4`) and `::1` are normalised, so list plain IPv4. |
+| `trustProxy` | Honour `X-Forwarded-For` / `X-Real-IP`. Only enable behind a proxy you control — otherwise a client can claim any IP and walk past `allowedIps`. |
+| `rateLimit.perPairing` | Game → Discord messages per pairing code. Sliding window, so no boundary bursts. |
+| `rateLimit.perIp` | All relay requests per client IP; this is what a long-poll budget is drawn from. |
+| `dataFile` | Where pairings are persisted (hashes only). |
+
+A malformed `allowedIps` entry (a hostname, or `/64` on an IPv4 address) aborts startup with a clear message instead of silently locking everyone out.
+
+### What a blocked server sees
+
+The relay answers with a machine-readable error and a human sentence, and the
+game server prints the same thing in its console (`discord` command shows it as
+`last error`):
+
+| Status | Error | Meaning |
+|---|---|---|
+| 403 | `ip_not_allowed` | The game server's IP is not in `allowedIps`. |
+| 429 | `rate_limited` | Over the per-pairing or per-IP limit; `retryAfter` says how long. |
+| 401 | `invalid pairing code` | Code unknown or revoked; run `/pair` again. |
+| 502 | `discord_send_failed` | The bot cannot post in that channel (missing, or no permission). |
 
 Put a TLS reverse proxy (Caddy, nginx, Traefik) in front: game servers should
 talk HTTPS, because the pairing code is a bearer secret.
@@ -103,10 +146,17 @@ PairingCode = "ABCDEFGHJK"
 
 Both endpoints are `POST` with a JSON body containing the `code`.
 
-`POST /v1/relay/send` — game to Discord:
+`POST /v1/relay/send` — game to Discord. Player chat:
 
 ```json
 { "code": "ABCDEFGHJK", "name": "Player1", "message": "hello" }
+```
+
+Or a system line (server started, a player joined, ...) which is posted without
+a player prefix:
+
+```json
+{ "code": "ABCDEFGHJK", "system": true, "message": "**Server started**" }
 ```
 
 `POST /v1/relay/poll` — Discord to game, long-polls up to `wait` seconds:
@@ -127,6 +177,14 @@ message arrives or the wait window expires, so an idle server costs no traffic.
 
 ## Behaviour notes
 
+- Two threads on the game server: one sends, one long-polls. The poll blocks for
+  the whole window, so sharing a thread meant chat waited behind it (this was
+  the "server to Discord takes forever" bug).
+- Every relayed Discord message is also printed in the server console as
+  `[Discord] Name: message`, so server owners can follow Discord without
+  alt-tabbing.
+- Server start/stop and player join/leave are posted as system lines. Turn them
+  off with `RelayEvents = false` in `RaspiConfig.toml`.
 - Bot messages, webhooks and messages without a guild are ignored, which stops
   the `game -> Discord -> game` loop.
 - Mention parsing is disabled on send, so player text cannot ping `@everyone`.

@@ -35,7 +35,7 @@ function commandList({ SlashCommandBuilder, PermissionFlagsBits }) {
  * Bot messages and webhooks are ignored when relaying, which is what stops the
  * game -> Discord -> game feedback loop.
  */
-export async function createBot({ core, token, log = () => {}, onChange = () => {} }) {
+export async function createBot({ core, token, log = () => {}, onChange = () => {}, publicUrl = '', relayLocked = false }) {
   // Imported lazily so a missing `npm install` or a missing token produces a
   // clear message from index.js instead of a module-resolution stack trace.
   const {
@@ -102,6 +102,9 @@ export async function createBot({ core, token, log = () => {}, onChange = () => 
         });
         onChange();
         log('pair', `channel ${channel.id} (${interaction.guild.name}) paired`);
+        const relayLine = publicUrl
+          ? `RelayUrl = "${publicUrl}"`
+          : 'RelayUrl = "https://your-relay-url"   # set publicUrl in the relay config';
         await interaction.reply({
           ephemeral: true,
           content: [
@@ -110,11 +113,14 @@ export async function createBot({ core, token, log = () => {}, onChange = () => 
             '```toml',
             '[Discord]',
             'Enabled = true',
-            'RelayUrl = "https://relay.example.com"',
+            relayLine,
             `PairingCode = "${code}"`,
             '```',
             'The code is a secret: anyone who has it can read and write this channel\'s bridge. ',
             'Use `/unpair` to revoke it.',
+            relayLocked
+              ? 'Note: this relay only accepts connections from allowlisted IPs. If the bridge stays silent, ask the relay owner to add your server\'s IP.'
+              : '',
           ].join('\n'),
         });
         return;
@@ -161,21 +167,32 @@ export async function createBot({ core, token, log = () => {}, onChange = () => 
   };
 }
 
+/** Players cannot inject Discord markdown (or a fake system event). */
+function safeName(name) {
+  const text = String(name ?? 'Player')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/[*_~`]/g, '')
+    .trim()
+    .slice(0, 64);
+  return text || 'Player';
+}
+
 /**
  * Sends a game message into the paired Discord channel.
- * Mention parsing is disabled so player text can never ping @everyone.
+ *
+ * Chat lines are prefixed with the player name; system lines (server started,
+ * player joined, ...) are sent verbatim because the game server already
+ * formatted them. Mention parsing is disabled on both so nothing a player
+ * types can ping @everyone.
  */
 export function createDiscordSender({ client, log = () => {} }) {
-  return async function sendToDiscord(pairing, { name, message }) {
-    const channel = await client.channels.fetch(pairing.channelId);
+  return async function sendToDiscord(pairing, { name, message, system = false }) {
+    const channel = await client.channels.fetch(pairing.channelId).catch(() => null);
     if (!channel || !channel.isTextBased()) {
-      throw new Error(`channel ${pairing.channelId} is not text based`);
+      throw new Error(`channel ${pairing.channelId} is missing, not text based, or not visible to the bot`);
     }
-    const safeName = name.replace(/\*\*/g, '').replace(/[`_~]/g, '');
-    await channel.send({
-      content: `**${safeName}**: ${message}`,
-      allowedMentions: { parse: [] },
-    });
-    log('relay', `delivered message from ${safeName}`);
+    const content = system ? String(message) : `**${safeName(name)}**: ${message}`;
+    await channel.send({ content, allowedMentions: { parse: [] } });
+    log('relay', system ? 'delivered system line' : `delivered message from ${safeName(name)}`);
   };
 }

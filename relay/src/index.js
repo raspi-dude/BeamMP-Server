@@ -3,8 +3,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { RelayCore } from './relay-core.js';
+import { RateLimiter } from './rate-limit.js';
 import { createRelayServer } from './server.js';
 import { createBot, createDiscordSender } from './bot.js';
+import { describeConfig, loadConfig } from './config.js';
 
 function log(scope, message) {
   console.log(`[${new Date().toISOString()}] [${scope}] ${message}`);
@@ -31,9 +33,19 @@ if (!token) {
   process.exit(1);
 }
 
-const port = Number(process.env.PORT ?? 8099);
-const host = process.env.HOST ?? '0.0.0.0';
-const dataFile = process.env.DATA_FILE ?? path.join(process.cwd(), 'data', 'pairings.json');
+let config;
+try {
+  config = loadConfig();
+} catch (error) {
+  console.error(`Bad relay config: ${error.message}`);
+  process.exit(1);
+}
+
+const port = config.port;
+const host = config.host;
+const dataFile = config.dataFile.includes(path.sep) || config.dataFile.includes('/')
+  ? config.dataFile
+  : path.join(process.cwd(), 'data', config.dataFile);
 
 const core = new RelayCore();
 if (existsSync(dataFile)) {
@@ -65,11 +77,35 @@ function schedulePersist() {
   }, 250);
 }
 
-const bot = await createBot({ core, token, log, onChange: schedulePersist });
+for (const line of describeConfig(config).split('\n')) {
+  log('config', line);
+}
+if (!config.ipLock.locked) {
+  log('warn', 'This relay accepts game servers from ANY IP. Set allowedIps in relay/config.json to lock it to your hosting IPs.');
+}
+
+const bot = await createBot({
+  core,
+  token,
+  log,
+  onChange: schedulePersist,
+  publicUrl: config.publicUrl,
+  relayLocked: config.ipLock.locked,
+});
 const server = createRelayServer({
   core,
   sendToDiscord: createDiscordSender({ client: bot.client, log }),
   log,
+  ipLock: config.ipLock,
+  trustProxy: config.trustProxy,
+  perPairingLimiter: new RateLimiter({
+    windowSeconds: config.rateLimit.perPairing.windowSeconds,
+    max: config.rateLimit.perPairing.maxMessages,
+  }),
+  perIpLimiter: new RateLimiter({
+    windowSeconds: config.rateLimit.perIp.windowSeconds,
+    max: config.rateLimit.perIp.maxRequests,
+  }),
 });
 
 let shuttingDown = false;

@@ -1,8 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import { RelayCore, generateCode, hashCode } from '../src/relay-core.js';
 import { createRelayServer } from '../src/server.js';
+import { RateLimiter } from '../src/rate-limit.js';
+import { IpAllowList, clientIp, normalizeIp } from '../src/net.js';
+import { loadConfig } from '../src/config.js';
 
 const CHANNEL = '123456789012345678';
 
@@ -159,7 +166,7 @@ test('pairings survive a save/load round trip without the plaintext code', async
 
 // ---- HTTP layer ----
 
-async function withServer(run, { sendImpl } = {}) {
+async function withServer(run, { sendImpl, ...options } = {}) {
   const core = newCore();
   const sent = [];
   const server = createRelayServer({
@@ -167,6 +174,7 @@ async function withServer(run, { sendImpl } = {}) {
     sendToDiscord: sendImpl ?? (async (pairing, msg) => {
       sent.push({ channelId: pairing.channelId, ...msg });
     }),
+    ...options,
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
@@ -183,7 +191,7 @@ test('HTTP: health reports pairing count', async () => {
     core.createPairing({ channelId: CHANNEL });
     const response = await fetch(`${base}/health`);
     assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { ok: true, pairings: 1 });
+    assert.deepEqual(await response.json(), { ok: true, pairings: 1, ipLock: 'off' });
   });
 });
 
@@ -197,7 +205,7 @@ test('HTTP: send reaches Discord and poll returns it to the game server', async 
       body: JSON.stringify({ code, name: 'Player1', message: 'hello from the game' }),
     });
     assert.equal(sendResponse.status, 200);
-    assert.deepEqual(sent, [{ channelId: CHANNEL, name: 'Player1', message: 'hello from the game' }]);
+    assert.deepEqual(sent, [{ channelId: CHANNEL, name: 'Player1', message: 'hello from the game', system: false }]);
 
     // Discord side replies, then the game polls it back.
     core.publish(CHANNEL, { name: 'DiscordUser', message: 'hello from discord' });
@@ -259,5 +267,180 @@ test('HTTP: malformed body is 400, wrong method is 404', async () => {
 
     const wrongMethod = await fetch(`${base}/v1/relay/poll`);
     assert.equal(wrongMethod.status, 404);
+  });
+});
+
+// ---- IP lock, rate limits and config ----
+
+test('IpAllowList matches exact IPs, CIDR blocks and IPv4-mapped addresses', () => {
+  const list = new IpAllowList(['203.0.113.7', '10.0.0.0/8', '2001:db8::/32']);
+  assert.equal(list.locked, true);
+  assert.equal(list.allows('203.0.113.7'), true);
+  assert.equal(list.allows('10.1.2.3'), true);
+  assert.equal(list.allows('2001:db8::5'), true);
+  assert.equal(list.allows('203.0.113.8'), false);
+  assert.equal(list.allows('11.0.0.1'), false);
+  assert.equal(list.allows('not-an-ip'), false);
+  // A dual-stack listener reports IPv4 clients as ::ffff:1.2.3.4.
+  assert.equal(list.allows('::ffff:203.0.113.7'), true);
+});
+
+test('an empty allowlist allows everything and reports itself unlocked', () => {
+  const list = new IpAllowList([]);
+  assert.equal(list.locked, false);
+  assert.equal(list.allows('203.0.113.7'), true);
+  assert.equal(normalizeIp('::ffff:10.0.0.1'), '10.0.0.1');
+  assert.equal(normalizeIp('[2001:db8::1]'), '2001:db8::1');
+});
+
+test('a malformed allowedIps entry is rejected instead of silently ignored', () => {
+  assert.throws(() => new IpAllowList(['10.0.0.0/64']), /prefix length/);
+  assert.throws(() => new IpAllowList(['example.com']), /not an IP address/);
+});
+
+test('clientIp only honours forwarding headers when the proxy is trusted', () => {
+  const req = {
+    headers: { 'x-forwarded-for': '203.0.113.9, 10.0.0.1' },
+    socket: { remoteAddress: '::ffff:127.0.0.1' },
+  };
+  assert.equal(clientIp(req, { trustProxy: false }), '127.0.0.1');
+  assert.equal(clientIp(req, { trustProxy: true }), '203.0.113.9');
+
+  const realIp = { headers: { 'x-real-ip': '198.51.100.4' }, socket: { remoteAddress: '127.0.0.1' } };
+  assert.equal(clientIp(realIp, { trustProxy: true }), '198.51.100.4');
+});
+
+test('RateLimiter blocks over the limit and frees up after the window', () => {
+  let now = 1_000_000;
+  const limiter = new RateLimiter({ windowSeconds: 10, max: 2, now: () => now });
+
+  assert.equal(limiter.take('code').allowed, true);
+  assert.equal(limiter.take('code').allowed, true);
+  const blocked = limiter.take('code');
+  assert.equal(blocked.allowed, false);
+  assert.ok(blocked.retryAfter >= 1 && blocked.retryAfter <= 10);
+  // Other keys are unaffected.
+  assert.equal(limiter.take('other').allowed, true);
+
+  now += 11_000;
+  assert.equal(limiter.take('code').allowed, true);
+});
+
+test('loadConfig applies defaults, file values and env overrides', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'relay-config-'));
+  const file = path.join(dir, 'config.json');
+  writeFileSync(file, JSON.stringify({
+    publicUrl: 'https://relay.raspi.host',
+    allowedIps: ['10.0.0.0/8'],
+    trustProxy: true,
+    rateLimit: { perPairing: { windowSeconds: 5, maxMessages: 4 } },
+  }));
+
+  const fromFile = loadConfig({}, file);
+  assert.equal(fromFile.publicUrl, 'https://relay.raspi.host');
+  assert.equal(fromFile.ipLock.locked, true);
+  assert.equal(fromFile.ipLock.allows('10.9.9.9'), true);
+  assert.equal(fromFile.trustProxy, true);
+  assert.equal(fromFile.rateLimit.perPairing.maxMessages, 4);
+  // Untouched values keep their documented defaults.
+  assert.equal(fromFile.rateLimit.perIp.maxRequests, 600);
+  assert.equal(fromFile.port, 8099);
+
+  const fromEnv = loadConfig({ RELAY_ALLOWED_IPS: '203.0.113.7, 192.0.2.0/24', RELAY_PUBLIC_URL: 'https://x.test' }, file);
+  assert.equal(fromEnv.ipLock.allows('192.0.2.5'), true);
+  assert.equal(fromEnv.ipLock.allows('10.9.9.9'), false);
+  assert.equal(fromEnv.publicUrl, 'https://x.test');
+
+  writeFileSync(file, JSON.stringify({ allowedIps: ['10.0.0.0/99'] }));
+  assert.throws(() => loadConfig({}, file), /prefix length/);
+});
+
+test('HTTP: a client outside allowedIps gets 403 with an explanation', async () => {
+  const ipLock = new IpAllowList(['203.0.113.7']);
+  await withServer(async ({ core, base }) => {
+    const { code } = core.createPairing({ channelId: CHANNEL });
+    const response = await fetch(`${base}/v1/relay/send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code, name: 'a', message: 'b' }),
+    });
+    assert.equal(response.status, 403);
+    const payload = await response.json();
+    assert.equal(payload.error, 'ip_not_allowed');
+    assert.match(payload.message, /Raspi Host/);
+    assert.match(payload.message, /allowedIps/);
+    // The same lock must protect polling.
+    const poll = await fetch(`${base}/v1/relay/poll`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code, cursor: 0, wait: 0 }),
+    });
+    assert.equal(poll.status, 403);
+    // Health is for monitoring and stays reachable.
+    assert.equal((await fetch(`${base}/health`)).status, 200);
+  }, { ipLock });
+});
+
+test('HTTP: an allowlisted local client passes the lock', async () => {
+  const ipLock = new IpAllowList(['127.0.0.1']);
+  await withServer(async ({ core, base }) => {
+    const { code } = core.createPairing({ channelId: CHANNEL });
+    const response = await fetch(`${base}/v1/relay/send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code, name: 'a', message: 'b' }),
+    });
+    assert.equal(response.status, 200);
+  }, { ipLock });
+});
+
+test('HTTP: per pairing rate limit returns 429 with a retry hint', async () => {
+  const perPairingLimiter = new RateLimiter({ windowSeconds: 60, max: 2 });
+  await withServer(async ({ core, base }) => {
+    const { code } = core.createPairing({ channelId: CHANNEL });
+    const send = () => fetch(`${base}/v1/relay/send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code, name: 'a', message: 'spam' }),
+    });
+    assert.equal((await send()).status, 200);
+    assert.equal((await send()).status, 200);
+    const limited = await send();
+    assert.equal(limited.status, 429);
+    assert.ok(Number(limited.headers.get('retry-after')) >= 1);
+    const payload = await limited.json();
+    assert.equal(payload.error, 'rate_limited');
+    assert.match(payload.message, /too quickly/);
+  }, { perPairingLimiter });
+});
+
+test('HTTP: per IP rate limit applies before authentication', async () => {
+  const perIpLimiter = new RateLimiter({ windowSeconds: 60, max: 1 });
+  await withServer(async ({ base }) => {
+    const first = await fetch(`${base}/v1/relay/poll`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'NOPE', wait: 0 }),
+    });
+    assert.equal(first.status, 401);
+    const second = await fetch(`${base}/v1/relay/poll`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'NOPE', wait: 0 }),
+    });
+    assert.equal(second.status, 429);
+  }, { perIpLimiter });
+});
+
+test('HTTP: system messages are passed through without a player name', async () => {
+  await withServer(async ({ core, base, sent }) => {
+    const { code } = core.createPairing({ channelId: CHANNEL });
+    const response = await fetch(`${base}/v1/relay/send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code, system: true, message: '**Server started**' }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(sent, [{ channelId: CHANNEL, name: null, message: '**Server started**', system: true }]);
   });
 });
