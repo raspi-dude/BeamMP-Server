@@ -3,9 +3,12 @@ name: Linux
 on:
   push:
     branches:
-      - "develop"
-      - "minor"
+      - '**'
   pull_request:
+
+concurrency:
+  group: linux-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
@@ -34,7 +37,7 @@ jobs:
         uses: lukka/get-cmake@v3.28.1
 
       - name: Export GitHub Actions cache environment variables
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
@@ -45,7 +48,7 @@ jobs:
           apt-get update -y
           apt-get install -y git
 
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         with:
           submodules: "recursive"
           fetch-depth: 0
@@ -106,7 +109,7 @@ jobs:
         uses: lukka/get-cmake@v3.28.1
 
       - name: Export GitHub Actions cache environment variables
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
@@ -117,7 +120,7 @@ jobs:
           apt-get update -y
           apt-get install -y git
 
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         with:
           submodules: "recursive"
           fetch-depth: 0
