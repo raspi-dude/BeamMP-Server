@@ -22,10 +22,23 @@
 #include "CustomAssert.h"
 
 #include <curl/easy.h>
+#include <atomic>
+#include <chrono>
 #include <map>
 #include <nlohmann/json.hpp>
+#include <thread>
 
 using json = nlohmann::json;
+
+/**
+ * Cancel a transfer when the caller set its abort flag. curl polls this at
+ * least once per second even while waiting on a slow or idle response, which
+ * is what makes a blocked long-poll interruptible.
+ */
+static int CurlAbortCallback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    const auto* Abort = static_cast<const std::atomic<bool>*>(clientp);
+    return (Abort != nullptr && Abort->load(std::memory_order_acquire)) ? 1 : 0;
+}
 
 static size_t CurlWriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
     std::string* Result = reinterpret_cast<std::string*>(userp);
@@ -156,7 +169,7 @@ std::string Http::GET(const std::string& url, unsigned int* status) {
     return Ret;
 }
 
-std::string Http::POST(const std::string& url, const std::string& body, const std::string& ContentType, unsigned int* status, const std::map<std::string, std::string>& headers) {
+std::string Http::POST(const std::string& url, const std::string& body, const std::string& ContentType, unsigned int* status, const std::map<std::string, std::string>& headers, const std::atomic<bool>* Abort) {
     std::string Ret;
     CurlLease Lease{};
     CURL* curl = Lease.GetHandle();
@@ -189,10 +202,23 @@ std::string Http::POST(const std::string& url, const std::string& body, const st
 
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+        if (Abort != nullptr) {
+            curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+            curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, CurlAbortCallback);
+            curl_easy_setopt(curl, CURLOPT_XFERINFODATA, const_cast<std::atomic<bool>*>(Abort));
+        }
         errbuf[0] = 0;
         res = curl_easy_perform(curl);
         curl_slist_free_all(list);
         if (res != CURLE_OK) {
+            // A cancelled request is the caller's own doing, not a failure.
+            // Status is zeroed so callers never see a stale sentinel value.
+            if (res == CURLE_ABORTED_BY_CALLBACK) {
+                if (status) {
+                    *status = 0;
+                }
+                return Http::ErrorString;
+            }
             beammp_error("POST to " + url + " failed: " + std::string(curl_easy_strerror(res)));
             beammp_error("Curl error: " + std::string(errbuf));
             return Http::ErrorString;
@@ -307,6 +333,41 @@ TEST_CASE("Http::Status::ToString") {
     CHECK(Http::Status::ToString(200) == "OK");
     CHECK(Http::Status::ToString(696969) == "696969");
     CHECK(Http::Status::ToString(-1) == "Invalid Response Code");
+}
+
+TEST_CASE("Http::POST aborts a slow request when the abort flag is set") {
+    // Stands in for the relay's long-poll: it holds the request open far longer
+    // than the test is willing to wait.
+    httplib::Server SlowServer;
+    SlowServer.Post("/slow", [](const httplib::Request&, httplib::Response& res) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        res.set_content("too late", "text/plain");
+    });
+    const int Port = SlowServer.bind_to_any_port("127.0.0.1");
+    REQUIRE(Port > 0);
+    std::thread Listener([&SlowServer] { SlowServer.listen_after_bind(); });
+
+    std::atomic<bool> Abort { false };
+    std::thread Canceller([&Abort] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        Abort.store(true, std::memory_order_release);
+    });
+
+    const auto Start = std::chrono::steady_clock::now();
+    unsigned int Status = 1;
+    const std::string Result = Http::POST("http://127.0.0.1:" + std::to_string(Port) + "/slow",
+        "{}", "application/json", &Status, {}, &Abort);
+    const auto Elapsed = std::chrono::steady_clock::now() - Start;
+
+    Canceller.join();
+    SlowServer.stop();
+    Listener.join();
+
+    CHECK(Result == Http::ErrorString);
+    CHECK(Status == 0);
+    // curl calls the progress callback about once a second, so this must still
+    // be well below the 5s the server would have taken.
+    CHECK(Elapsed < std::chrono::seconds(3));
 }
 
 Http::Server::THttpServerInstance::THttpServerInstance() {

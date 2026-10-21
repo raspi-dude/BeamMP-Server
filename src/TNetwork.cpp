@@ -22,6 +22,7 @@
 #include "Env.h"
 #include "LuaAPI.h"
 #include "TConnectionLimiter.h"
+#include "TDiscordBridge.h"
 #include "THeartbeatThread.h"
 #include "TLuaEngine.h"
 #include "TModeration.h"
@@ -1025,6 +1026,10 @@ void TNetwork::OnDisconnect(const std::weak_ptr<TClient>& ClientPtr) {
     }
     Packet = ("L") + c.GetName() + (" left the server!");
     SendToAll(&c, StringToVector(Packet), false, true);
+    // Only players that actually got in are worth announcing.
+    if (c.IsSynced()) {
+        Application::Discord().AnnouncePlayerLeave(c.GetName());
+    }
     Packet.clear();
     auto Futures = LuaAPI::MP::Engine->TriggerEvent("onPlayerDisconnect", "", c.GetID());
     LuaAPI::MP::Engine->WaitForAll(Futures);
@@ -1335,6 +1340,8 @@ bool TNetwork::SyncClient(const std::weak_ptr<TClient>& c) {
     }
     LockedClient->SetIsSynced(true);
     beammp_info(LockedClient->GetName() + (" is now synced!"));
+    // No-op unless the Discord bridge is enabled.
+    Application::Discord().AnnouncePlayerJoin(LockedClient->GetName());
     return true;
 }
 

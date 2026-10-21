@@ -118,6 +118,7 @@ TRaspiConfig TRaspiConfig::Load(const std::filesystem::path& Path) {
             Config.Discord.PairingCode = GetString(*Discord, "PairingCode", Config.Discord.PairingCode);
             Config.Discord.RelayServerChat = GetBool(*Discord, "RelayServerChat", Config.Discord.RelayServerChat);
             Config.Discord.RelayDiscordChat = GetBool(*Discord, "RelayDiscordChat", Config.Discord.RelayDiscordChat);
+            Config.Discord.RelayEvents = GetBool(*Discord, "RelayEvents", Config.Discord.RelayEvents);
             Config.Discord.PollWaitSeconds = GetInt(*Discord, "PollWaitSeconds", Config.Discord.PollWaitSeconds);
             Config.Discord.MaxQueue = GetInt(*Discord, "MaxQueue", Config.Discord.MaxQueue);
 
@@ -315,6 +316,9 @@ void TRaspiConfig::FlushToFile(const std::filesystem::path& Path) const {
         << Quote(Discord.PairingCode) << "\n"
         << "RelayServerChat = " << (Discord.RelayServerChat ? "true" : "false") << "\n"
         << "RelayDiscordChat = " << (Discord.RelayDiscordChat ? "true" : "false") << "\n"
+        << "# Announce server start/stop and player join/leave in Discord.\n"
+           "RelayEvents = "
+        << (Discord.RelayEvents ? "true" : "false") << "\n"
         << "# Long-poll window in seconds (1-20; the HTTP client times out at 30).\n"
            "PollWaitSeconds = "
         << Discord.PollWaitSeconds << "\n"

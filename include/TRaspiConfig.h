@@ -254,6 +254,7 @@ namespace Moderation {
             std::string PairingCode; ///< from /pair in Discord; treat like a password
             bool RelayServerChat { true };
             bool RelayDiscordChat { true };
+            bool RelayEvents { true }; ///< server start/stop and player join/leave
             int PollWaitSeconds { 20 };
             int MaxQueue { 64 };
         };

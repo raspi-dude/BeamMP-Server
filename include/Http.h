@@ -40,7 +40,10 @@ namespace fs = std::filesystem;
 
 namespace Http {
 std::string GET(const std::string& url, unsigned int* status = nullptr);
-std::string POST(const std::string& url, const std::string& body, const std::string& ContentType, unsigned int* status = nullptr, const std::map<std::string, std::string>& headers = {});
+/// Performs a POST. If `Abort` is not null, the request is cancelled within a
+/// second of the flag being set, which lets long-polls be interrupted on
+/// shutdown instead of blocking it for the whole poll window.
+std::string POST(const std::string& url, const std::string& body, const std::string& ContentType, unsigned int* status = nullptr, const std::map<std::string, std::string>& headers = {}, const std::atomic<bool>* Abort = nullptr);
 namespace Status {
     std::string ToString(int code);
 }
