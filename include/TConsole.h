@@ -54,6 +54,13 @@ private:
     void Command_Lua(const std::string& cmd, const std::vector<std::string>& args);
     void Command_Help(const std::string& cmd, const std::vector<std::string>& args);
     void Command_Kick(const std::string& cmd, const std::vector<std::string>& args);
+    void Command_Ban(const std::string& cmd, const std::vector<std::string>& args);
+    void Command_IpBan(const std::string& cmd, const std::vector<std::string>& args);
+    void Command_Unban(const std::string& cmd, const std::vector<std::string>& args);
+    void Command_BanList(const std::string& cmd, const std::vector<std::string>& args);
+    void Command_Mute(const std::string& cmd, const std::vector<std::string>& args);
+    void Command_Unmute(const std::string& cmd, const std::vector<std::string>& args);
+    void RunModerationCommand(const std::string& SubCommand, const std::vector<std::string>& args);
     void Command_List(const std::string& cmd, const std::vector<std::string>& args);
     void Command_Status(const std::string& cmd, const std::vector<std::string>& args);
     void Command_Settings(const std::string& cmd, const std::vector<std::string>& args);
@@ -62,6 +69,7 @@ private:
     void Command_ProtectMod(const std::string& cmd, const std::vector<std::string>& args);
     void Command_ReloadMods(const std::string& cmd, const std::vector<std::string>& args);
     void Command_NetTest(const std::string& cmd, const std::vector<std::string>& args);
+    void Command_Discord(const std::string& cmd, const std::vector<std::string>& args);
 
     void Command_Say(const std::string& FullCommand);
     bool EnsureArgsCount(const std::vector<std::string>& args, size_t n);
@@ -74,6 +82,12 @@ private:
         { "lua", [this](const auto& a, const auto& b) { Command_Lua(a, b); } },
         { "help", [this](const auto& a, const auto& b) { Command_Help(a, b); } },
         { "kick", [this](const auto& a, const auto& b) { Command_Kick(a, b); } },
+        { "ban", [this](const auto& a, const auto& b) { Command_Ban(a, b); } },
+        { "ipban", [this](const auto& a, const auto& b) { Command_IpBan(a, b); } },
+        { "unban", [this](const auto& a, const auto& b) { Command_Unban(a, b); } },
+        { "banlist", [this](const auto& a, const auto& b) { Command_BanList(a, b); } },
+        { "mute", [this](const auto& a, const auto& b) { Command_Mute(a, b); } },
+        { "unmute", [this](const auto& a, const auto& b) { Command_Unmute(a, b); } },
         { "list", [this](const auto& a, const auto& b) { Command_List(a, b); } },
         { "status", [this](const auto& a, const auto& b) { Command_Status(a, b); } },
         { "settings", [this](const auto& a, const auto& b) { Command_Settings(a, b); } },
@@ -83,6 +97,7 @@ private:
         { "protectmod", [this](const auto& a, const auto& b) { Command_ProtectMod(a, b); } },
         { "reloadmods", [this](const auto& a, const auto& b) { Command_ReloadMods(a, b); } },
         { "nettest", [this](const auto& a, const auto& b) { Command_NetTest(a, b); } },
+        { "discord", [this](const auto& a, const auto& b) { Command_Discord(a, b); } },
     };
 
     std::unique_ptr<Commandline> mCommandline { nullptr };

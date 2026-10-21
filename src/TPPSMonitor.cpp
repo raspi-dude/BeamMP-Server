@@ -18,6 +18,7 @@
 
 #include "TPPSMonitor.h"
 #include "Client.h"
+#include "TModeration.h"
 #include "TNetwork.h"
 
 TPPSMonitor::TPPSMonitor(TServer& Server)
@@ -46,6 +47,10 @@ void TPPSMonitor::operator()() {
     std::vector<std::shared_ptr<TClient>> TimedOutClients;
     while (!Application::IsShuttingDown()) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (mNetwork) {
+            // Warns then kicks idle players; needs the network to send both.
+            Application::Moderation().TickAfk(mServer, Network());
+        }
         int C = 0, V = 0;
         if (mServer.ClientCount() == 0) {
             Application::SetPPS("-");

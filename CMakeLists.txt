@@ -69,11 +69,14 @@ set(PRJ_SOURCES
     src/TConsole.cpp
     src/THeartbeatThread.cpp
     src/TIoPollThread.cpp
+    src/TDiscordBridge.cpp
     src/TLuaEngine.cpp
     src/TLuaPlugin.cpp
+    src/TModeration.cpp
     src/TNetwork.cpp
     src/TPluginMonitor.cpp
     src/TPPSMonitor.cpp
+    src/TRaspiConfig.cpp
     src/TResourceManager.cpp
     src/TScopedTimer.cpp
     src/TServer.cpp

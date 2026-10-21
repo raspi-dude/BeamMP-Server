@@ -24,7 +24,9 @@
 #include "Settings.h"
 #include "SignalHandling.h"
 #include "TConfig.h"
+#include "TDiscordBridge.h"
 #include "THeartbeatThread.h"
+#include "TModeration.h"
 #include "TLuaEngine.h"
 #include "TNetwork.h"
 #include "TPPSMonitor.h"
@@ -160,6 +162,10 @@ int BeamMPServerMain(MainArguments Arguments) {
 
     Config.PrintDebug();
 
+    // Built-in moderation lives in its own config file next to ServerConfig.toml,
+    // so it gets generated and loaded before any client can connect.
+    Application::Moderation().Initialize(fs::path(ConfigPath).parent_path() / "RaspiConfig.toml");
+
     Application::InitializeConsole();
     Application::Console().StartLoggingToFile();
 
@@ -187,6 +193,14 @@ int BeamMPServerMain(MainArguments Arguments) {
     TPPSMonitor PPSMonitor(Server);
     THeartbeatThread Heartbeat(ResourceManager, Server);
     TNetwork Network(Server, PPSMonitor, ResourceManager);
+
+    // The Discord bridge only allocates its thread and queue if enabled in
+    // RaspiConfig.toml; otherwise this is a no-op.
+    Application::Discord().Configure(Application::Moderation().Config().Discord);
+    Application::Discord().Start(Network);
+    Application::RegisterShutdownHandler([] {
+        Application::Discord().Shutdown();
+    });
 
     auto LuaEngine = std::make_shared<TLuaEngine>();
     LuaEngine->SetServer(&Server);

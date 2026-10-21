@@ -25,6 +25,8 @@
 #include "Http.h"
 #include "LuaAPI.h"
 #include "TLuaEngine.h"
+#include "TDiscordBridge.h"
+#include "TModeration.h"
 
 #include <ctime>
 #include <lua.hpp>
@@ -212,6 +214,12 @@ void TConsole::Command_Help(const std::string&, const std::vector<std::string>& 
         help                       displays this help
         exit                       shuts down the server
         kick <name> [reason]       kicks specified player with an optional reason
+        ban <name> [duration] [reason]      bans a player (durations: 30m, 12h, 7d, permanent)
+        ipban <name> [duration] [reason]    bans a player and their IP address
+        unban <name|ip|all>        removes matching bans
+        banlist                    lists active bans
+        mute <name> [duration] [reason]     prevents a player from chatting
+        unmute <name>              lets a player chat again
         list                       lists all players and info about them
         say <message>              sends the message to all players in chat
         lua [state id]             switches to lua, optionally into a specific state id's lua
@@ -220,7 +228,8 @@ void TConsole::Command_Help(const std::string&, const std::vector<std::string>& 
         clear                      clears the console window
         version                    displays the server version
         protectmod <name> <value>  sets whether a mod is protected, value can be true or false
-        reloadmods                 reloads all mods from the Resources Client folder)";
+        reloadmods                 reloads all mods from the Resources Client folder
+        discord                    shows the Discord bridge status)";
     Application::Console().WriteRaw("BeamMP-Server Console: " + std::string(sHelpString));
 }
 
@@ -292,6 +301,13 @@ void TConsole::Command_ReloadMods(const std::string& cmd, const std::vector<std:
     Application::Console().WriteRaw("Mods reloaded.");
 }
 
+void TConsole::Command_Discord(const std::string&, const std::vector<std::string>& args) {
+    if (!EnsureArgsCount(args, 0)) {
+        return;
+    }
+    Application::Console().WriteRaw("Discord bridge: " + Application::Discord().Status());
+}
+
 void TConsole::Command_NetTest(const std::string& cmd, const std::vector<std::string>& args) {
     unsigned int status = 0;
 
@@ -347,6 +363,48 @@ void TConsole::Command_Kick(const std::string&, const std::vector<std::string>& 
     } else {
         Application::Console().WriteRaw("Kicked player '" + Name + "' for reason: '" + Reason + "'.");
     }
+}
+
+void TConsole::RunModerationCommand(const std::string& SubCommand, const std::vector<std::string>& args) {
+    if (mLuaEngine == nullptr) {
+        Application::Console().WriteRaw("Error: the server is not ready yet, try again in a moment.");
+        return;
+    }
+    std::vector<std::string> AllArgs { SubCommand };
+    AllArgs.insert(AllArgs.end(), args.begin(), args.end());
+    Application::Moderation().ExecuteCommand(AllArgs, "console", mLuaEngine->Server(), mLuaEngine->Network(),
+        [](const std::string& Text) {
+            // Multi-line replies (help, banlist) are printed line by line.
+            std::istringstream Stream(Text);
+            std::string Line;
+            while (std::getline(Stream, Line)) {
+                Application::Console().WriteRaw(Line);
+            }
+        });
+}
+
+void TConsole::Command_Ban(const std::string&, const std::vector<std::string>& args) {
+    RunModerationCommand("ban", args);
+}
+
+void TConsole::Command_IpBan(const std::string&, const std::vector<std::string>& args) {
+    RunModerationCommand("ipban", args);
+}
+
+void TConsole::Command_Unban(const std::string&, const std::vector<std::string>& args) {
+    RunModerationCommand("unban", args);
+}
+
+void TConsole::Command_BanList(const std::string&, const std::vector<std::string>& args) {
+    RunModerationCommand("banlist", args);
+}
+
+void TConsole::Command_Mute(const std::string&, const std::vector<std::string>& args) {
+    RunModerationCommand("mute", args);
+}
+
+void TConsole::Command_Unmute(const std::string&, const std::vector<std::string>& args) {
+    RunModerationCommand("unmute", args);
 }
 
 std::tuple<std::string, std::vector<std::string>> TConsole::ParseCommand(const std::string& CommandWithArgs) {

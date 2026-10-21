@@ -24,6 +24,7 @@
 #include "TConnectionLimiter.h"
 #include "THeartbeatThread.h"
 #include "TLuaEngine.h"
+#include "TModeration.h"
 #include "TScopedTimer.h"
 #include "nlohmann/json.hpp"
 #include <CustomAssert.h>
@@ -390,6 +391,14 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
     Client->SetIdentifier("ip", ip);
     beammp_tracef("This thread is ip {} ({})", ip, RawConnection.SockAddr.address().to_v6().is_v4_mapped() ? "IPv4 mapped IPv6" : "IPv6");
 
+    // IP bans are checked before any handshake or backend call so banned hosts
+    // cost us nothing and cannot probe the authentication endpoint.
+    if (const auto BanReason = Application::Moderation().IpBanReason(ip)) {
+        beammp_info("Rejected connection from banned IP '" + ip + "'");
+        ClientKick(*Client, *BanReason);
+        return nullptr;
+    }
+
     if (Application::GetSubsystemStatuses().at("Main") == Application::Status::Starting) {
         ClientKick(*Client, "The server is still starting, please try joining again later.");
         return nullptr;
@@ -489,6 +498,14 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
         beammp_errorf("Client sent invalid key. Error was: {}", e.what());
         // TODO: we should really clarify that this was a backend response or parsing error
         ClientKick(*Client, "Invalid key! Please restart your game.");
+        return nullptr;
+    }
+
+    // Account/name bans are checked as soon as the backend told us who this is,
+    // before plugins get a chance to see the player.
+    if (const auto BanReason = Application::Moderation().IdentityBanReason(Client->GetName(), Client->GetIdentifiers())) {
+        beammp_info("Rejected banned player '" + Client->GetName() + "' with reason: " + *BanReason);
+        ClientKick(*Client, *BanReason);
         return nullptr;
     }
 

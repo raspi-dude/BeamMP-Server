@@ -20,7 +20,9 @@
 #include "Client.h"
 #include "Common.h"
 #include "CustomAssert.h"
+#include "TDiscordBridge.h"
 #include "TLuaEngine.h"
+#include "TModeration.h"
 #include "TNetwork.h"
 #include "TPPSMonitor.h"
 #include <TLuaPlugin.h>
@@ -288,6 +290,54 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
            beammp_debugf("Chat message too long from '{}' ({}), ignoring it", LockedClient->GetName(), LockedClient->GetID());
            return;
         }
+
+        auto& Moderator = Application::Moderation();
+        Moderator.NoteChat(LockedClient->GetID());
+        // In-game moderation commands are consumed here and never broadcast.
+        if (Moderator.HandleChatCommand(*LockedClient, Message, *this, Network)) {
+            return;
+        }
+        if (const auto MuteRemaining = Moderator.MuteRemaining(LockedClient->GetID())) {
+            Network.Respond(*LockedClient,
+                StringToVector(fmt::format("C:Server: You are muted, {} remaining.", *MuteRemaining)), true);
+            beammp_debugf("Dropped chat message from muted player '{}' ({})", LockedClient->GetName(), LockedClient->GetID());
+            return;
+        }
+        const auto FilterResult = Moderator.FilterMessage(Message);
+        switch (FilterResult.Action) {
+        case EModerationFilterAction::Allow:
+            break;
+        case EModerationFilterAction::Censor:
+            // Replaced in place, so plugins and players only ever see the censored text.
+            Message = FilterResult.Text;
+            break;
+        case EModerationFilterAction::Block:
+            Network.Respond(*LockedClient,
+                StringToVector("C:Server: Your message contained a filtered word and was not sent."), true);
+            beammp_debugf("Blocked chat message from '{}' containing '{}'", LockedClient->GetName(), FilterResult.MatchedWord);
+            return;
+        case EModerationFilterAction::Kick:
+            beammp_infof("Kicking '{}' ({}) for filtered word '{}'", LockedClient->GetName(), LockedClient->GetID(), FilterResult.MatchedWord);
+            Network.ClientKick(*LockedClient,
+                fmt::format("Kicked: your message contained a filtered word (\"{}\")", FilterResult.MatchedWord));
+            return;
+        case EModerationFilterAction::Mute: {
+            const int Minutes = Moderator.Config().ChatFilter.MuteMinutes;
+            Moderator.ApplyMute(LockedClient->GetID(), LockedClient->GetName(), std::chrono::minutes(Minutes),
+                fmt::format("Automatic chat filter: \"{}\"", FilterResult.MatchedWord));
+            beammp_infof("Auto-muted '{}' ({}) for {} minute(s) after filtered word '{}'", LockedClient->GetName(),
+                LockedClient->GetID(), Minutes, FilterResult.MatchedWord);
+            Network.Respond(*LockedClient,
+                StringToVector(fmt::format("C:Server: You have been muted for {} minute(s) (filtered word).", Minutes)), true);
+            return;
+        }
+        default:
+            break;
+        }
+
+        // Mirror the (possibly censored) message to Discord when the bridge is on.
+        Application::Discord().OnChat(LockedClient->GetName(), Message);
+
         auto Futures = LuaAPI::MP::Engine->TriggerEvent("onChatMessage", "", LockedClient->GetID(), LockedClient->GetName(), Message);
         TLuaEngine::WaitForAll(Futures);
         LogChatMessage(LockedClient->GetName(), LockedClient->GetID(), PacketAsString.substr(PacketAsString.find(':', 3) + 1));
@@ -339,6 +389,8 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
 
         Network.SendToAll(LockedClient.get(), Packet, false, false);
         HandlePosition(*LockedClient, StringPacket);
+        // AFK: only a *changed* position counts as activity, so parked players time out.
+        Application::Moderation().NotePosition(LockedClient->GetID(), StringPacket);
         return;
     }
     default:

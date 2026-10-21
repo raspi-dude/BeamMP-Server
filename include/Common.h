@@ -41,6 +41,9 @@ namespace fs = std::filesystem;
 #include "Settings.h"
 #include "TConsole.h"
 
+class TModeration;
+class TDiscordBridge;
+
 struct Version {
     uint8_t major;
     uint8_t minor;
@@ -72,6 +75,10 @@ public:
     // Causes all threads to finish up and exit gracefull gracefully
     static void GracefullyShutdown();
     static TConsole& Console() { return mConsole; }
+    // Built-in moderation: bans, chat filter, AFK enforcement. Defined in TModeration.cpp.
+    static TModeration& Moderation();
+    // Optional Discord relay client. Allocates nothing until enabled and started.
+    static TDiscordBridge& Discord();
     static std::string ServerVersionString();
     static const Version& ServerVersion() { return mVersion; }
     static Version ClientMinimumVersion() { return Version { 2, 7, 0 }; }

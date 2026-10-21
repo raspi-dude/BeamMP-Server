@@ -1,0 +1,17 @@
+{
+  "name": "raspi-host-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Central Discord relay for BeamMP servers using pairing codes (no bot token per server)",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/relay.test.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3"
+  }
+}

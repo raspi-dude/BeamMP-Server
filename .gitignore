@@ -478,3 +478,8 @@ callgrind.*
 notes/*
 compile_commands.json
 nohup.out
+
+# Raspi Host Discord relay
+relay/node_modules/
+relay/data/
+relay/src/token.txt
