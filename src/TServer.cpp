@@ -298,8 +298,8 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
             return;
         }
         if (const auto MuteRemaining = Moderator.MuteRemaining(LockedClient->GetID())) {
-            Network.Respond(*LockedClient,
-                StringToVector(fmt::format("C:Server: You are muted, {} remaining.", *MuteRemaining)), true);
+            beammp_ignore(Network.Respond(*LockedClient,
+                StringToVector(fmt::format("C:Server: You are muted, {} remaining.", *MuteRemaining)), true));
             beammp_debugf("Dropped chat message from muted player '{}' ({})", LockedClient->GetName(), LockedClient->GetID());
             return;
         }
@@ -312,8 +312,8 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
             Message = FilterResult.Text;
             break;
         case EModerationFilterAction::Block:
-            Network.Respond(*LockedClient,
-                StringToVector("C:Server: Your message contained a filtered word and was not sent."), true);
+            beammp_ignore(Network.Respond(*LockedClient,
+                StringToVector("C:Server: Your message contained a filtered word and was not sent."), true));
             beammp_debugf("Blocked chat message from '{}' containing '{}'", LockedClient->GetName(), FilterResult.MatchedWord);
             return;
         case EModerationFilterAction::Kick:
@@ -327,8 +327,8 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
                 fmt::format("Automatic chat filter: \"{}\"", FilterResult.MatchedWord));
             beammp_infof("Auto-muted '{}' ({}) for {} minute(s) after filtered word '{}'", LockedClient->GetName(),
                 LockedClient->GetID(), Minutes, FilterResult.MatchedWord);
-            Network.Respond(*LockedClient,
-                StringToVector(fmt::format("C:Server: You have been muted for {} minute(s) (filtered word).", Minutes)), true);
+            beammp_ignore(Network.Respond(*LockedClient,
+                StringToVector(fmt::format("C:Server: You have been muted for {} minute(s) (filtered word).", Minutes)), true));
             return;
         }
         default:
