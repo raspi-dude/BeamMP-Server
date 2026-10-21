@@ -424,3 +424,47 @@ TEST_CASE("Moderation::TRaspiConfig defaults") {
     CHECK(Defaults.Discord.PollWaitSeconds <= 20);
     CHECK(Defaults.Discord.MaxQueue > 0);
 }
+
+TEST_CASE("Moderation::TRaspiConfig loads several operators") {
+    using namespace Moderation;
+
+    const auto Path = std::filesystem::temp_directory_path() / "rh-moderation-operators-test.toml";
+    {
+        std::ofstream Out(Path);
+        Out << "[Moderation]\n"
+               "Enabled = true\n"
+               "CommandPrefix = \"!\"\n"
+               "\n[[Moderation.Operators]]\n"
+               "Name = \"Raspi\"\n"
+               "IP = \"\"\n"
+               "\n[[Moderation.Operators]]\n"
+               "Name = \"SecondAdmin\"\n"
+               "IP = \"203.0.113.7\"\n"
+               "\n[[Moderation.Operators]]\n"
+               "Name = \"SecondAdmin\"\n"
+               "IP = \"198.51.100.9\"\n"
+               "\n[[Moderation.Operators]]\n"
+               "IP = \"192.0.2.1\"\n";
+    }
+
+    const auto Config = TRaspiConfig::Load(Path);
+    std::filesystem::remove(Path);
+
+    // The nameless entry is dropped; the repeated name is kept once per IP.
+    REQUIRE(Config.Operators.size() == 3u);
+    CHECK(Config.Operators[0].Name == "Raspi");
+    CHECK(Config.Operators[0].IP.empty());
+    CHECK(Config.Operators[1].Name == "SecondAdmin");
+    CHECK(Config.Operators[1].IP == "203.0.113.7");
+    CHECK(Config.Operators[2].IP == "198.51.100.9");
+
+    // Either of the pinned addresses is accepted for that one name.
+    const auto IsOperator = [&Config](const std::string& Name, const std::string& Ip) {
+        return std::any_of(Config.Operators.begin(), Config.Operators.end(),
+            [&Name, &Ip](const TRaspiConfig::TOperator& Op) { return MatchesOperator(Name, Ip, Op.Name, Op.IP); });
+    };
+    CHECK(IsOperator("SecondAdmin", "203.0.113.7"));
+    CHECK(IsOperator("SecondAdmin", "198.51.100.9"));
+    CHECK_FALSE(IsOperator("SecondAdmin", "192.0.2.1"));
+    CHECK(IsOperator("raspi", "10.0.0.1"));
+}
