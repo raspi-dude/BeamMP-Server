@@ -172,11 +172,13 @@ export class RelayCore {
           resolve({ cursor: pairing.nextId - 1, messages });
         },
       };
+      // Deliberately ref'd: an unref'd timer lets Node drain the event loop while
+      // this promise is still pending, so a caller with no other pending work
+      // (a unit test, or a relay with no open sockets) would never get a reply.
       const timer = setTimeout(() => {
         pairing.waiters.delete(waiter);
         resolve({ cursor: pairing.nextId - 1, messages: [] });
       }, cappedWait);
-      timer.unref?.();
       pairing.waiters.add(waiter);
     });
   }
