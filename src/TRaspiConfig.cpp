@@ -423,6 +423,10 @@ TEST_CASE("Moderation::TRaspiConfig defaults") {
     CHECK_FALSE(Defaults.Discord.Enabled);
     CHECK(Defaults.Discord.RelayUrl.empty());
     CHECK(Defaults.Discord.PairingCode.empty());
+    // join/leave/start/stop announcements are on once the bridge is enabled
+    CHECK(Defaults.Discord.RelayEvents);
+    CHECK(Defaults.Discord.RelayServerChat);
+    CHECK(Defaults.Discord.RelayDiscordChat);
     // must stay below the 30s HTTP timeout or long-polls get cut short
     CHECK(Defaults.Discord.PollWaitSeconds > 0);
     CHECK(Defaults.Discord.PollWaitSeconds <= 20);

@@ -358,10 +358,15 @@ void TDiscordBridge::SenderWorker() {
         beammp_ignore(Response);
 
         if (HttpStatus == 200) {
-            std::lock_guard Lock(State.Mutex);
-            ++State.Sent;
-            State.SendFailures = 0;
-            State.LastError.clear();
+            {
+                std::lock_guard Lock(State.Mutex);
+                ++State.Sent;
+                State.SendFailures = 0;
+                State.LastError.clear();
+            }
+            // Wakes Shutdown(), which waits for the queue to drain so the
+            // "server stopped" line actually goes out.
+            State.CV.notify_all();
             continue;
         }
 
@@ -379,6 +384,7 @@ void TDiscordBridge::SenderWorker() {
             Failures = State.SendFailures;
             State.LastError = DescribeRelayError(HttpStatus, Response);
         }
+        State.CV.notify_all();
         if (GiveUp) {
             break;
         }
