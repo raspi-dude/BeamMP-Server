@@ -131,20 +131,16 @@ void TResourceManager::RefreshFiles() {
             std::ifstream stream(File, std::ios::binary);
 
             const size_t FileSize = std::filesystem::file_size(File);
+            constexpr size_t ReadBufferSize = 1024 * 1024; // larger sequential reads keep HDDs busy
             size_t Read = 0;
-            std::vector<char> Data;
+            std::vector<char> Data(std::min<size_t>(FileSize, ReadBufferSize));
             while (Read < FileSize) {
-                Data.resize(size_t(std::min<size_t>(FileSize - Read, 4096)));
-                size_t RealDataSize = Data.size();
                 stream.read(Data.data(), std::streamsize(Data.size()));
-                if (stream.eof() || stream.fail()) {
-                    RealDataSize = size_t(stream.gcount());
-                }
-                Data.resize(RealDataSize);
+                const size_t RealDataSize = size_t(stream.gcount());
                 if (RealDataSize == 0) {
                     break;
                 }
-                if (RealDataSize > 0 && !EVP_DigestUpdate(mdctx, Data.data(), Data.size())) {
+                if (!EVP_DigestUpdate(mdctx, Data.data(), RealDataSize)) {
                     EVP_MD_CTX_free(mdctx);
                     throw std::runtime_error("EVP_DigestUpdate() failed");
                 }
