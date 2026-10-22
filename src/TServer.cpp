@@ -293,7 +293,12 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
 
         auto& Moderator = Application::Moderation();
         Moderator.NoteChat(LockedClient->GetID());
-        // In-game moderation commands are consumed here and never broadcast.
+        // The rules command is for everyone and is checked before the
+        // operator-only commands and before the mute check: a muted player can
+        // still read the rules. Consumed messages are never broadcast.
+        if (Moderator.HandleRulesCommand(*LockedClient, Message, Network)) {
+            return;
+        }
         if (Moderator.HandleChatCommand(*LockedClient, Message, *this, Network)) {
             return;
         }

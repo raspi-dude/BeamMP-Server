@@ -101,6 +101,11 @@ public:
     void NotePosition(int ClientID, const std::string& Payload);
     void TickAfk(TServer& Server, TNetwork& Network);
 
+    /// Handles the configured rules command ("!rules") for every player, not
+    /// just operators. Returns true when the message was consumed, in which case
+    /// it must not be broadcast.
+    bool HandleRulesCommand(TClient& Sender, const std::string& Message, TNetwork& Network);
+
     /// Handles an in-game command ("!ban ..."). Returns true when the message
     /// was a command, in which case it must not be broadcast.
     bool HandleChatCommand(TClient& Sender, const std::string& Message, TServer& Server, TNetwork& Network);

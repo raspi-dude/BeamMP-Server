@@ -131,6 +131,28 @@ TRaspiConfig TRaspiConfig::Load(const std::filesystem::path& Path) {
             }
         }
 
+        // [Rules] is also top-level and works without moderation enabled: any
+        // player can ask for the server rules in chat.
+        if (const auto* Rules = FindValue(Data, "Rules"); Rules != nullptr && Rules->is_table()) {
+            Config.Rules.Command = std::string(Trim(GetString(*Rules, "Command", Config.Rules.Command)));
+            if (const auto* Lines = FindValue(*Rules, "Lines"); Lines != nullptr) {
+                if (!Lines->is_array()) {
+                    beammp_warn("RaspiConfig: 'Rules.Lines' must be an array of strings, ignoring it");
+                } else {
+                    for (const auto& Line : Lines->as_array()) {
+                        if (!Line.is_string()) {
+                            beammp_warn("RaspiConfig: every [Rules] Lines entry must be a string, ignoring one");
+                            continue;
+                        }
+                        const std::string Text(Trim(Line.as_string()));
+                        if (!Text.empty()) {
+                            Config.Rules.Lines.push_back(Text);
+                        }
+                    }
+                }
+            }
+        }
+
         const auto* Mod = FindValue(Data, "Moderation");
         if (Mod == nullptr) {
             beammp_warn("RaspiConfig: no [Moderation] table found, using defaults");
@@ -301,6 +323,22 @@ void TRaspiConfig::FlushToFile(const std::filesystem::path& Path) const {
            "IgnoreOperators = "
         << (Afk.IgnoreOperators ? "true" : "false") << "\n";
 
+    Out << "\n[Rules]\n"
+           "# In-game command that shows the rules. Prefix included; empty disables it.\n"
+           "Command = "
+        << Quote(Rules.Command) << "\n"
+        <<           "# One chat line per entry, sent only to the player who asked.\n"
+           "# Example: Lines = [\"No ramming\", \"Keep chat friendly\"]\n"
+           "# Leave the list empty to disable the command.\n"
+           "Lines = [";
+    for (size_t i = 0; i < Rules.Lines.size(); ++i) {
+        if (i != 0) {
+            Out << ", ";
+        }
+        Out << Quote(Rules.Lines[i]);
+    }
+    Out << "]\n";
+
     Out << "\n[Discord]\n"
            "# Chat bridge to the public Raspi Host Discord bot.\n"
            "# Disabled means no thread, socket or queue is created at all.\n"
@@ -431,6 +469,62 @@ TEST_CASE("Moderation::TRaspiConfig defaults") {
     CHECK(Defaults.Discord.PollWaitSeconds > 0);
     CHECK(Defaults.Discord.PollWaitSeconds <= 20);
     CHECK(Defaults.Discord.MaxQueue > 0);
+
+    // the rules command ships enabled but silent: no placeholder lines
+    CHECK(Defaults.Rules.Command == "!rules");
+    CHECK(Defaults.Rules.Lines.empty());
+}
+
+TEST_CASE("Moderation::MatchesCommand") {
+    using namespace Moderation;
+
+    CHECK(MatchesCommand("!rules", "!rules"));
+    CHECK(MatchesCommand("  !rules \n", "!rules"));
+    CHECK(MatchesCommand("!RULES", "!rules"));
+    CHECK(MatchesCommand("!rules", " !rules "));
+    // extra words are ordinary chat, not the command
+    CHECK_FALSE(MatchesCommand("!rules please", "!rules"));
+    CHECK_FALSE(MatchesCommand("rules", "!rules"));
+    // an empty command means "off"
+    CHECK_FALSE(MatchesCommand("!rules", ""));
+    CHECK_FALSE(MatchesCommand("", "!rules"));
+}
+
+TEST_CASE("Moderation::FormatRuleLines") {
+    using namespace Moderation;
+
+    CHECK(FormatRuleLines({}).empty());
+
+    // Empty entries are dropped; over-long ones are cut to fit a chat packet.
+    const auto Out = FormatRuleLines({ "No ramming", "", std::string(500, 'x') });
+    REQUIRE(Out.size() == 2u);
+    CHECK(Out[0] == "No ramming");
+    CHECK(Out[1].size() == 400u);
+}
+
+TEST_CASE("Moderation::TRaspiConfig loads the rules command") {
+    using namespace Moderation;
+
+    const auto Path = std::filesystem::temp_directory_path() / "rh-rules-test.toml";
+    {
+        std::ofstream Out(Path);
+        Out << "[Rules]\n"
+               "Command = \"!regeln\"\n"
+               "Lines = [\"No ramming\", \"  Be nice  \", \"\", \"Report bugs on Discord\"]\n"
+               "\n[Moderation]\n"
+               "Enabled = true\n";
+    }
+
+    const auto Config = TRaspiConfig::Load(Path);
+    std::filesystem::remove(Path);
+
+    CHECK(Config.Rules.Command == "!regeln");
+    // empty entries are dropped, surrounding whitespace is trimmed
+    REQUIRE(Config.Rules.Lines.size() == 3u);
+    CHECK(Config.Rules.Lines[0] == "No ramming");
+    CHECK(Config.Rules.Lines[1] == "Be nice");
+    CHECK(Config.Rules.Lines[2] == "Report bugs on Discord");
+    CHECK(MatchesCommand("!regeln", Config.Rules.Command));
 }
 
 TEST_CASE("Moderation::TRaspiConfig loads several operators") {

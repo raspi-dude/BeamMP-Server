@@ -27,6 +27,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // Built-in moderation. Settings live in their own TOML file (RaspiConfig.toml)
@@ -215,6 +216,32 @@ namespace Moderation {
         return Trim(IP) == Trim(OperatorIP);
     }
 
+    /// True when Message is exactly Command, ignoring case and surrounding
+    /// whitespace. An empty command never matches, which is how the feature is
+    /// switched off.
+    inline bool MatchesCommand(std::string_view Message, std::string_view Command) {
+        if (Trim(Command).empty()) {
+            return false;
+        }
+        return ToLower(Trim(Message)) == ToLower(Trim(Command));
+    }
+
+    /// Truncates each configured rules line so it fits in a chat packet, and
+    /// drops empty ones so nobody gets a blank "Server:" line.
+    inline std::vector<std::string> FormatRuleLines(const std::vector<std::string>& Lines) {
+        std::vector<std::string> Out;
+        Out.reserve(Lines.size());
+        for (auto Line : Lines) {
+            if (Line.size() > 400) {
+                Line.resize(400);
+            }
+            if (!Line.empty()) {
+                Out.push_back(std::move(Line));
+            }
+        }
+        return Out;
+    }
+
     /// Settings of RaspiConfig.toml.
     struct TRaspiConfig {
         struct TOperator {
@@ -259,6 +286,13 @@ namespace Moderation {
             int MaxQueue { 64 };
         };
 
+        /// The in-game `!rules` command. Independent of [Moderation]: it is
+        /// meant for players, not operators.
+        struct TRulesSettings {
+            std::string Command { "!rules" }; ///< prefix included; empty disables it
+            std::vector<std::string> Lines; ///< one chat line per entry; empty disables it
+        };
+
         bool Enabled { true };
         std::string CommandPrefix { "!" };
         std::string DefaultMuteDuration { "10m" };
@@ -267,6 +301,7 @@ namespace Moderation {
         TChatFilterSettings ChatFilter;
         TAfkSettings Afk;
         TDiscordSettings Discord;
+        TRulesSettings Rules;
 
         /// Loads Path, writing a documented default file first if it is missing.
         /// Never throws; on a parse error the built-in defaults are kept.

@@ -20,6 +20,7 @@
 #include "Common.h"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fmt/core.h>
 #include <ios>
@@ -27,6 +28,37 @@
 #include <openssl/evp.h>
 
 namespace fs = std::filesystem;
+
+namespace {
+
+std::string HumanSize(size_t Bytes) {
+    constexpr const char* Units[] = { "B", "KiB", "MiB", "GiB", "TiB" };
+    constexpr size_t UnitCount = sizeof(Units) / sizeof(Units[0]);
+    double Value = static_cast<double>(Bytes);
+    size_t Unit = 0;
+    while (Value >= 1024.0 && Unit + 1 < UnitCount) {
+        Value /= 1024.0;
+        ++Unit;
+    }
+    if (Unit == 0) {
+        return fmt::format("{} {}", Bytes, Units[Unit]);
+    }
+    return fmt::format("{:.1f} {}", Value, Units[Unit]);
+}
+
+/// A plain ASCII bar so it renders the same in a terminal, a log file and the
+/// Pterodactyl console.
+std::string ProgressBar(double Fraction, size_t Width) {
+    Fraction = std::clamp(Fraction, 0.0, 1.0);
+    const auto Filled = static_cast<size_t>(Fraction * static_cast<double>(Width) + 0.5);
+    std::string Bar(Width, '-');
+    for (size_t i = 0; i < Filled && i < Width; ++i) {
+        Bar[i] = '#';
+    }
+    return Bar;
+}
+
+} // namespace
 
 TResourceManager::TResourceManager() {
     Application::SetSubsystemStatus("ResourceManager", Application::Status::Starting);
@@ -52,7 +84,8 @@ TResourceManager::TResourceManager() {
     }
 
     if (mModsLoaded) {
-        beammp_info("Loaded " + std::to_string(mModsLoaded) + " Mods");
+        beammp_infof("Found {} mod(s) ({}); checking them next - large files are hashed once and then cached",
+            mModsLoaded, HumanSize(mMaxModSize));
     }
 
     Application::SetSubsystemStatus("ResourceManager", Application::Status::Good);
@@ -63,7 +96,12 @@ void TResourceManager::RefreshFiles() {
     std::unique_lock Lock(mModsMutex);
 
     std::string Path = Application::Settings.getAsString(Settings::Key::General_ResourceFolder) + "/Client";
+    const auto StartTime = std::chrono::steady_clock::now();
+    size_t HashedCount = 0;
+    size_t CachedCount = 0;
 
+    beammp_info("Checking mods: unchanged files are loaded from mods.json, new or modified ones are hashed "
+                "(a large mod can take a while - the server is busy, not frozen)");
     nlohmann::json modsDB;
 
     if (std::filesystem::exists(Path + "/mods.json")) {
@@ -105,6 +143,7 @@ void TResourceManager::RefreshFiles() {
                     { "protected", dbEntry["protected"] } });
 
                 beammp_debugf("Mod '{}' loaded from cache", File);
+                ++CachedCount;
 
                 continue;
             }
@@ -131,6 +170,10 @@ void TResourceManager::RefreshFiles() {
             std::ifstream stream(File, std::ios::binary);
 
             const size_t FileSize = std::filesystem::file_size(File);
+            const std::string ModName = entry.path().filename().string();
+            beammp_infof("Hashing '{}' ({}) ...", ModName, HumanSize(FileSize));
+            const auto HashStarted = std::chrono::steady_clock::now();
+            auto LastReport = HashStarted;
             constexpr size_t ReadBufferSize = 1024 * 1024; // larger sequential reads keep HDDs busy
             size_t Read = 0;
             std::vector<char> Data(std::min<size_t>(FileSize, ReadBufferSize));
@@ -145,6 +188,16 @@ void TResourceManager::RefreshFiles() {
                     throw std::runtime_error("EVP_DigestUpdate() failed");
                 }
                 Read += RealDataSize;
+                // One line per second at most: a progress bar in a log file is
+                // useful, a bar per megabyte is noise.
+                if (const auto Now = std::chrono::steady_clock::now();
+                    Read < FileSize && Now - LastReport >= std::chrono::seconds(1)) {
+                    LastReport = Now;
+                    // Only read by the log line below, which compiles to nothing
+                    // in builds without a console (the test target).
+                    [[maybe_unused]] const double Fraction = static_cast<double>(Read) / static_cast<double>(FileSize);
+                    beammp_infof("  '{}' [{}] {:3.0f}%", ModName, ProgressBar(Fraction, 24), Fraction * 100.0);
+                }
             }
             unsigned int sha256_len = 0;
             if (!EVP_DigestFinal_ex(mdctx, sha256_value, &sha256_len)) {
@@ -160,6 +213,9 @@ void TResourceManager::RefreshFiles() {
                 result += fmt::format("{:02x}", sha256_value[i]);
             }
             beammp_debugf("sha256('{}'): {}", File, result);
+            beammp_infof("  '{}' hashed in {:.2f}s", ModName,
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - HashStarted).count());
+            ++HashedCount;
             mMods.push_back(nlohmann::json {
                 { "file_name", std::filesystem::path(File).filename() },
                 { "file_size", std::filesystem::file_size(File) },
@@ -198,6 +254,28 @@ void TResourceManager::RefreshFiles() {
     } catch (std::exception& e) {
         beammp_error("Failed to update mod DB: " + std::string(e.what()));
     }
+
+    if (HashedCount > 0 || CachedCount > 0) {
+        beammp_infof("Mod check finished: {} hashed, {} from cache, {:.1f}s total", HashedCount, CachedCount,
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - StartTime).count());
+    }
+}
+
+TEST_CASE("ResourceManager::HumanSize") {
+    CHECK(HumanSize(0) == "0 B");
+    CHECK(HumanSize(1023) == "1023 B");
+    CHECK(HumanSize(1024) == "1.0 KiB");
+    CHECK(HumanSize(1536) == "1.5 KiB");
+    CHECK(HumanSize(5 * 1024 * 1024) == "5.0 MiB");
+}
+
+TEST_CASE("ResourceManager::ProgressBar") {
+    CHECK(ProgressBar(0.0, 10) == "----------");
+    CHECK(ProgressBar(0.5, 10) == "#####-----");
+    CHECK(ProgressBar(1.0, 10) == "##########");
+    // out of range input is clamped instead of producing a wrong-width bar
+    CHECK(ProgressBar(-1.0, 10) == "----------");
+    CHECK(ProgressBar(2.0, 10) == "##########");
 }
 
 void TResourceManager::SetProtected(const std::string& ModName, bool Protected) {

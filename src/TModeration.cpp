@@ -138,6 +138,13 @@ void TModeration::Initialize(const std::filesystem::path& ConfigPath) {
             beammp_info("Moderation has no operators, no chat filter and no AFK enforcement configured");
         }
     }
+    // The rules command is independent of [Moderation], so it is reported
+    // outside that branch.
+    if (!mConfig.Rules.Lines.empty() && !mConfig.Rules.Command.empty()) {
+        beammp_infof("Rules command '{}' will show {} line(s) to anyone who asks", mConfig.Rules.Command, mConfig.Rules.Lines.size());
+    } else {
+        beammp_debug("Rules command not configured (set [Rules] Command and Lines to enable it)");
+    }
     Application::SetSubsystemStatus("Moderation", Application::Status::Good);
 }
 
@@ -363,6 +370,30 @@ void TModeration::TickAfk(TServer& Server, TNetwork& Network) {
         beammp_infof("Kicking AFK player '{}' ({})", Client->GetName(), Client->GetID());
         Network.ClientKick(*Client, Afk.KickReason);
     }
+}
+
+bool TModeration::HandleRulesCommand(TClient& Sender, const std::string& Message, TNetwork& Network) {
+    std::string Command;
+    std::vector<std::string> Lines;
+    {
+        std::lock_guard Lock(mMutex);
+        Command = mConfig.Rules.Command;
+        Lines = mConfig.Rules.Lines;
+    }
+    if (Lines.empty() || !Moderation::MatchesCommand(Message, Command)) {
+        return false;
+    }
+
+    // Only the player who asked sees the rules, so a curious player cannot
+    // spam the whole server with them.
+    for (const auto& Line : Moderation::FormatRuleLines(Lines)) {
+        if (Sender.IsDisconnected()) {
+            break;
+        }
+        SendChatTo(Network, Sender, Line);
+    }
+    beammp_debugf("Sent {} rule line(s) to '{}' ({})", Lines.size(), Sender.GetName(), Sender.GetID());
+    return true;
 }
 
 bool TModeration::HandleChatCommand(TClient& Sender, const std::string& Message, TServer& Server, TNetwork& Network) {
