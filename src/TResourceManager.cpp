@@ -319,9 +319,11 @@ TEST_CASE("ResourceManager::ModNeedsHash") {
     ModsDB["a.zip"]["filesize"] = 2;
     CHECK(ModNeedsHash(Entry, ModsDB));
 
-    // an older mtime than the file means it was modified
+    // an older mtime than the file means it was modified. The file clock's epoch
+    // is implementation-defined (libstdc++ counts back from a future date, so the
+    // raw value is negative), hence one tick below the real value instead of 0.
     ModsDB["a.zip"]["filesize"] = 1;
-    ModsDB["a.zip"]["lastwrite"] = int64_t(0);
+    ModsDB["a.zip"]["lastwrite"] = Entry.last_write_time().time_since_epoch().count() - 1;
     CHECK(ModNeedsHash(Entry, ModsDB));
 
     // malformed entries are re-hashed instead of throwing
