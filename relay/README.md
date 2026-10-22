@@ -78,7 +78,7 @@ Environment variables:
 | `DISCORD_GUILD_ID` | unset | Register slash commands in one guild (instant, for testing) |
 | `RELAY_PUBLIC_URL` | `config.json` | Overrides `publicUrl` |
 | `RELAY_ALLOWED_IPS` | `config.json` | Overrides `allowedIps`, comma separated |
-| `RELAY_TRUST_PROXY` | `config.json` | Overrides `trustProxy` (`true`/`false`); needed behind any reverse proxy |
+| `RELAY_TRUST_PROXY` | `config.json` | Overrides `trustProxy` (`true`/`false`); not needed if `RELAY_TRUSTED_PROXIES` is set |
 | `RELAY_TRUSTED_PROXIES` | `config.json` | Overrides `trustedProxies`, comma separated |
 
 ## Configuration (`relay/config.json`)
