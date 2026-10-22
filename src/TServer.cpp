@@ -302,7 +302,7 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
         if (Moderator.HandleChatCommand(*LockedClient, Message, *this, Network)) {
             return;
         }
-        if (const auto MuteRemaining = Moderator.MuteRemaining(LockedClient->GetID())) {
+        if (const auto MuteRemaining = Moderator.MuteRemaining(LockedClient->GetName(), LockedClient->GetIdentifiers())) {
             beammp_ignore(Network.Respond(*LockedClient,
                 StringToVector(fmt::format("C:Server: You are muted, {} remaining.", *MuteRemaining)), true));
             beammp_debugf("Dropped chat message from muted player '{}' ({})", LockedClient->GetName(), LockedClient->GetID());
@@ -328,8 +328,9 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
             return;
         case EModerationFilterAction::Mute: {
             const int Minutes = Moderator.Config().ChatFilter.MuteMinutes;
-            Moderator.ApplyMute(LockedClient->GetID(), LockedClient->GetName(), std::chrono::minutes(Minutes),
-                fmt::format("Automatic chat filter: \"{}\"", FilterResult.MatchedWord));
+            Moderator.ApplyMute(LockedClient->GetName(), TModeration::IdentityFromIdentifiers(LockedClient->GetIdentifiers()),
+                std::chrono::minutes(Minutes), fmt::format("Automatic chat filter: \"{}\"", FilterResult.MatchedWord),
+                "chat filter");
             beammp_infof("Auto-muted '{}' ({}) for {} minute(s) after filtered word '{}'", LockedClient->GetName(),
                 LockedClient->GetID(), Minutes, FilterResult.MatchedWord);
             beammp_ignore(Network.Respond(*LockedClient,

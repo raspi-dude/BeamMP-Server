@@ -220,6 +220,8 @@ void TConsole::Command_Help(const std::string&, const std::vector<std::string>& 
         banlist                    lists active bans
         mute <name> [duration] [reason]     prevents a player from chatting
         unmute <name>              lets a player chat again
+        reload                     re-reads RaspiConfig.toml while the server runs
+                                   (Discord settings need a restart)
         list                       lists all players and info about them
         say <message>              sends the message to all players in chat
         lua [state id]             switches to lua, optionally into a specific state id's lua
@@ -299,6 +301,26 @@ void TConsole::Command_ReloadMods(const std::string& cmd, const std::vector<std:
 
     mLuaEngine->Network().ResourceManager().RefreshFiles();
     Application::Console().WriteRaw("Mods reloaded.");
+}
+
+void TConsole::Command_Reload(const std::string&, const std::vector<std::string>& args) {
+    if (!EnsureArgsCount(args, 0)) {
+        return;
+    }
+    const auto Report = Application::Moderation().Reload();
+    if (!Report.Success) {
+        Application::Console().WriteRaw("Reload failed: " + Report.Error + ". Still using the old config.");
+        return;
+    }
+    if (Report.Changes.empty()) {
+        Application::Console().WriteRaw("Config reloaded, nothing changed.");
+        return;
+    }
+    Application::Console().WriteRaw(fmt::format("Config reloaded, {} {} applied.", Report.AppliedCount,
+        Report.AppliedCount == 1 ? "setting" : "settings"));
+    if (Report.DiscordRestartRequired) {
+        Application::Console().WriteRaw("Discord settings skipped, restart the server to apply them.");
+    }
 }
 
 void TConsole::Command_Discord(const std::string&, const std::vector<std::string>& args) {

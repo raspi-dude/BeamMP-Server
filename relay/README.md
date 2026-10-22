@@ -347,6 +347,10 @@ message arrives or the wait window expires, so an idle server costs no traffic.
   off with `RelayEvents = false` in `RaspiConfig.toml`. The restart only reports
   "**Server stopped**" once the send has actually gone out, so a slow relay can
   delay shutdown by up to three seconds.
+- `[Discord]` is only read at startup, since the bridge builds its threads,
+  queue and pairing then. `reload` in the console applies the rest of
+  `RaspiConfig.toml` (operators, bans, filter, AFK, rules) while the server is
+  running, and warns if the `[Discord]` table was changed too.
 - A game server never replays the channel's backlog: on startup the bridge reads
   the current cursor and ignores whatever was said while it was offline, then
   delivers everything posted from then on.

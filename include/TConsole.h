@@ -68,6 +68,7 @@ private:
     void Command_Version(const std::string& cmd, const std::vector<std::string>& args);
     void Command_ProtectMod(const std::string& cmd, const std::vector<std::string>& args);
     void Command_ReloadMods(const std::string& cmd, const std::vector<std::string>& args);
+    void Command_Reload(const std::string& cmd, const std::vector<std::string>& args);
     void Command_NetTest(const std::string& cmd, const std::vector<std::string>& args);
     void Command_Discord(const std::string& cmd, const std::vector<std::string>& args);
 
@@ -96,6 +97,7 @@ private:
         { "version", [this](const auto& a, const auto& b) { Command_Version(a, b); } },
         { "protectmod", [this](const auto& a, const auto& b) { Command_ProtectMod(a, b); } },
         { "reloadmods", [this](const auto& a, const auto& b) { Command_ReloadMods(a, b); } },
+        { "reload", [this](const auto& a, const auto& b) { Command_Reload(a, b); } },
         { "nettest", [this](const auto& a, const auto& b) { Command_NetTest(a, b); } },
         { "discord", [this](const auto& a, const auto& b) { Command_Discord(a, b); } },
     };

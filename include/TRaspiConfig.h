@@ -242,6 +242,8 @@ namespace Moderation {
         return Out;
     }
 
+    struct TLoadResult;
+
     /// Settings of RaspiConfig.toml.
     struct TRaspiConfig {
         struct TOperator {
@@ -307,8 +309,118 @@ namespace Moderation {
         /// Never throws; on a parse error the built-in defaults are kept.
         static TRaspiConfig Load(const std::filesystem::path& Path);
 
+        /// Like Load, but never creates the file and reports whether the
+        /// existing one could be read. `reload` uses it so a typo cannot
+        /// replace the running config with defaults.
+        static TLoadResult TryLoad(const std::filesystem::path& Path);
+
         /// Writes this config out, overwriting the file.
         void FlushToFile(const std::filesystem::path& Path) const;
     };
+
+    /// Outcome of TRaspiConfig::TryLoad: the config that was read, and whether
+    /// it could be read at all. `Error` is empty when Ok is true. Defined after
+    /// TRaspiConfig because it holds one by value.
+    struct TLoadResult {
+        TRaspiConfig Config;
+        bool Ok { false };
+        std::string Error;
+    };
+
+    /// One difference between two configurations, as reported by `reload`.
+    struct TConfigChange {
+        std::string Section; ///< "Moderation", "Moderation.Bans", "Rules", "Discord", ...
+        /// Ready to print, e.g. "Moderation.Bans.Enabled: true -> false".
+        std::string Text;
+    };
+
+    inline std::string BoolText(bool Value) { return Value ? "true" : "false"; }
+
+    /// Empty values would leave a blank spot in a log line, so spell them out.
+    inline std::string ValueText(const std::string& Value) { return Value.empty() ? "(empty)" : Value; }
+
+    /// Operators as one comparable string, e.g. "Raspi, Bob (203.0.113.7)".
+    inline std::string OperatorListText(const std::vector<TRaspiConfig::TOperator>& Operators) {
+        std::string Out;
+        for (const auto& Operator : Operators) {
+            if (!Out.empty()) {
+                Out += ", ";
+            }
+            Out += Operator.Name;
+            if (!Operator.IP.empty()) {
+                Out += " (" + Operator.IP + ")";
+            }
+        }
+        return Out.empty() ? "none" : Out;
+    }
+
+    /// Setting-by-setting comparison for `reload`, so it only reports what an
+    /// edit actually changed. Word and line lists are compared by size; the
+    /// names of a bad-word list are noise in the log.
+    inline std::vector<TConfigChange> DiffConfigs(const TRaspiConfig& Old, const TRaspiConfig& New) {
+        std::vector<TConfigChange> Changes;
+        const auto Report = [&Changes](const std::string& Section, const std::string& Name,
+                                const std::string& OldValue, const std::string& NewValue) {
+            if (OldValue != NewValue) {
+                Changes.push_back(TConfigChange { Section,
+                    Section + "." + Name + ": " + ValueText(OldValue) + " -> " + ValueText(NewValue) });
+            }
+        };
+        Report("Moderation", "Enabled", BoolText(Old.Enabled), BoolText(New.Enabled));
+        Report("Moderation", "CommandPrefix", Old.CommandPrefix, New.CommandPrefix);
+        Report("Moderation", "DefaultMuteDuration", Old.DefaultMuteDuration, New.DefaultMuteDuration);
+
+        const std::string OldOperators = OperatorListText(Old.Operators);
+        const std::string NewOperators = OperatorListText(New.Operators);
+        if (OldOperators != NewOperators) {
+            Changes.push_back(TConfigChange { "Moderation.Operators",
+                "Moderation.Operators: " + OldOperators + " -> " + NewOperators });
+        }
+
+        Report("Moderation.Bans", "Enabled", BoolText(Old.Bans.Enabled), BoolText(New.Bans.Enabled));
+        Report("Moderation.Bans", "DefaultReason", Old.Bans.DefaultReason, New.Bans.DefaultReason);
+        Report("Moderation.Bans", "DefaultDuration", Old.Bans.DefaultDuration, New.Bans.DefaultDuration);
+        Report("Moderation.Bans", "PersistToFile", BoolText(Old.Bans.Persist), BoolText(New.Bans.Persist));
+        Report("Moderation.Bans", "File", Old.Bans.File, New.Bans.File);
+
+        Report("Moderation.ChatFilter", "Enabled", BoolText(Old.ChatFilter.Enabled), BoolText(New.ChatFilter.Enabled));
+        Report("Moderation.ChatFilter", "Action", Old.ChatFilter.Action, New.ChatFilter.Action);
+        Report("Moderation.ChatFilter", "CensorChar", std::string(1, Old.ChatFilter.CensorChar),
+            std::string(1, New.ChatFilter.CensorChar));
+        Report("Moderation.ChatFilter", "MuteMinutes", std::to_string(Old.ChatFilter.MuteMinutes),
+            std::to_string(New.ChatFilter.MuteMinutes));
+        Report("Moderation.ChatFilter", "Words", std::to_string(Old.ChatFilter.Words.size()),
+            std::to_string(New.ChatFilter.Words.size()));
+
+        Report("Moderation.Afk", "Enabled", BoolText(Old.Afk.Enabled), BoolText(New.Afk.Enabled));
+        Report("Moderation.Afk", "TimeoutMinutes", std::to_string(Old.Afk.TimeoutMinutes),
+            std::to_string(New.Afk.TimeoutMinutes));
+        Report("Moderation.Afk", "WarnGraceSeconds", std::to_string(Old.Afk.WarnGraceSeconds),
+            std::to_string(New.Afk.WarnGraceSeconds));
+        Report("Moderation.Afk", "KickReason", Old.Afk.KickReason, New.Afk.KickReason);
+        Report("Moderation.Afk", "IgnoreOperators", BoolText(Old.Afk.IgnoreOperators), BoolText(New.Afk.IgnoreOperators));
+
+        Report("Rules", "Command", Old.Rules.Command, New.Rules.Command);
+        Report("Rules", "Lines", std::to_string(Old.Rules.Lines.size()),
+            std::to_string(New.Rules.Lines.size()));
+
+        Report("Discord", "Enabled", BoolText(Old.Discord.Enabled), BoolText(New.Discord.Enabled));
+        Report("Discord", "RelayUrl", Old.Discord.RelayUrl, New.Discord.RelayUrl);
+        if (Old.Discord.PairingCode != New.Discord.PairingCode) {
+            // The pairing code is a credential: say that it changed, never print it.
+            Changes.push_back(TConfigChange { "Discord", "Discord.PairingCode: changed" });
+        }
+        Report("Discord", "RelayServerChat", BoolText(Old.Discord.RelayServerChat),
+            BoolText(New.Discord.RelayServerChat));
+        Report("Discord", "RelayDiscordChat", BoolText(Old.Discord.RelayDiscordChat),
+            BoolText(New.Discord.RelayDiscordChat));
+        Report("Discord", "RelayEvents", BoolText(Old.Discord.RelayEvents), BoolText(New.Discord.RelayEvents));
+        Report("Discord", "PollWaitSeconds", std::to_string(Old.Discord.PollWaitSeconds),
+            std::to_string(New.Discord.PollWaitSeconds));
+        Report("Discord", "MaxQueue", std::to_string(Old.Discord.MaxQueue),
+            std::to_string(New.Discord.MaxQueue));
+
+        return Changes;
+    }
 
 } // namespace Moderation

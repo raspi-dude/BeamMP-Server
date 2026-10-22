@@ -63,11 +63,7 @@ std::string IpOf(const TClient& Client) {
 }
 
 std::string IdentityOf(const TClient& Client) {
-    const auto& Identifiers = Client.GetIdentifiers();
-    if (const auto It = Identifiers.find("beammp"); It != Identifiers.end() && !It->second.empty()) {
-        return It->second;
-    }
-    return Client.GetName();
+    return TModeration::IdentityFromIdentifiers(Client.GetIdentifiers());
 }
 
 // Exact case-insensitive match wins, otherwise a unique prefix match is used.
@@ -127,6 +123,7 @@ void TModeration::Initialize(const std::filesystem::path& ConfigPath) {
     mConfigPath = ConfigPath;
     mConfig = Moderation::TRaspiConfig::Load(ConfigPath);
     LoadBans();
+    LoadMutes();
     mInitialized = true;
 
     if (!mConfig.Enabled) {
@@ -146,6 +143,82 @@ void TModeration::Initialize(const std::filesystem::path& ConfigPath) {
         beammp_debug("Rules command not configured (set [Rules] Command and Lines to enable it)");
     }
     Application::SetSubsystemStatus("Moderation", Application::Status::Good);
+}
+
+TModeration::TReloadReport TModeration::Reload() {
+    TReloadReport Report;
+
+    // Serialized, so two reloads cannot interleave their ban/mute reads.
+    std::lock_guard ReloadLock(mReloadMutex);
+
+    Moderation::TRaspiConfig Old;
+    {
+        std::lock_guard Lock(mMutex);
+        if (!mInitialized) {
+            Report.Error = "moderation is not ready yet";
+            return Report;
+        }
+        Old = mConfig;
+    }
+
+    const auto Loaded = Moderation::TRaspiConfig::TryLoad(mConfigPath);
+    if (!Loaded.Ok) {
+        // A typo must not replace a working config with the defaults, so
+        // nothing is applied here.
+        Report.Error = fmt::format("'{}' could not be read ({})", mConfigPath.string(), Loaded.Error);
+        beammp_error("Reload failed, keeping the current config: " + Report.Error);
+        return Report;
+    }
+
+    Moderation::TRaspiConfig New = Loaded.Config;
+    Report.Changes = Moderation::DiffConfigs(Old, New);
+
+    // The bridge builds its threads, queue and relay session in main(), so
+    // [Discord] cannot be swapped underneath it. Keep what is running.
+    for (const auto& Change : Report.Changes) {
+        if (Change.Section == "Discord") {
+            Report.DiscordRestartRequired = true;
+        }
+    }
+    New.Discord = Old.Discord;
+
+    {
+        std::lock_guard Lock(mMutex);
+        mConfig = New;
+    }
+
+    // Re-read the files with the new settings, which also picks up a moved
+    // Bans.File. With PersistToFile off the loaders return early and the
+    // in-memory lists stay.
+    LoadBans();
+    LoadMutes();
+
+    for (const auto& Change : Report.Changes) {
+        if (Change.Section == "Discord") {
+            continue;
+        }
+        beammp_info("  " + Change.Text);
+        ++Report.AppliedCount;
+    }
+    if (Report.DiscordRestartRequired) {
+        for (const auto& Change : Report.Changes) {
+            if (Change.Section == "Discord") {
+                beammp_warn("  " + Change.Text);
+            }
+        }
+        beammp_warn("Discord settings in RaspiConfig.toml changed, but they are only read at startup. "
+                    "Restart the server to apply them.");
+    }
+    if (Report.Changes.empty()) {
+        beammp_info("Config reloaded from '" + mConfigPath.string() + "', nothing changed");
+    } else {
+        beammp_infof("Config reloaded from '{}', {} {} applied{}", mConfigPath.string(), Report.AppliedCount,
+            Report.AppliedCount == 1 ? "setting" : "settings",
+            Report.DiscordRestartRequired ? ", Discord settings need a restart" : "");
+    }
+
+    Report.Success = true;
+    return Report;
 }
 
 bool TModeration::Enabled() const {
@@ -240,25 +313,83 @@ TModerationFilterResult TModeration::FilterMessage(const std::string& Message) c
     return Result;
 }
 
-std::optional<std::string> TModeration::MuteRemaining(int ClientID) const {
-    std::lock_guard Lock(mMutex);
-    const auto It = mMutes.find(ClientID);
-    if (It == mMutes.end()) {
-        return std::nullopt;
-    }
-    const auto Now = TSteadyClock::now();
-    if (It->second.Expires <= Now) {
-        return std::nullopt;
-    }
-    return Moderation::FormatDuration(std::chrono::duration_cast<std::chrono::seconds>(It->second.Expires - Now));
+bool TModerationMute::Expired(std::chrono::system_clock::time_point Now) const {
+    return !Permanent && Expires <= Now;
 }
 
-void TModeration::ApplyMute(int ClientID, const std::string& Name, std::chrono::seconds Duration, const std::string& Reason) {
+std::string TModerationMute::RemainingText(std::chrono::system_clock::time_point Now) const {
+    if (Permanent) {
+        return "permanent";
+    }
+    return Moderation::FormatDuration(std::chrono::duration_cast<std::chrono::seconds>(Expires - Now));
+}
+
+std::string TModeration::IdentityFromIdentifiers(const std::unordered_map<std::string, std::string>& Identifiers) {
+    if (const auto It = Identifiers.find("beammp"); It != Identifiers.end() && !It->second.empty()) {
+        return It->second;
+    }
+    return { };
+}
+
+bool TModeration::MuteMatches(const TModerationMute& Mute, const std::string& Name, const std::string& Identity) {
+    if (!Mute.Identity.empty() && !Identity.empty() && Mute.Identity == Identity) {
+        return true;
+    }
+    if (Mute.Name.empty() || Name.empty()) {
+        return false;
+    }
+    return Moderation::ToLower(Mute.Name) == Moderation::ToLower(Name);
+}
+
+std::optional<std::string> TModeration::MuteRemaining(
+    const std::string& Name, const std::unordered_map<std::string, std::string>& Identifiers) const {
+    const std::string Identity = IdentityFromIdentifiers(Identifiers);
     std::lock_guard Lock(mMutex);
-    auto& Mute = mMutes[ClientID];
+    const auto Now = std::chrono::system_clock::now();
+    for (const auto& Mute : mMutes) {
+        if (Mute.Expired(Now) || !MuteMatches(Mute, Name, Identity)) {
+            continue;
+        }
+        return Mute.RemainingText(Now);
+    }
+    return std::nullopt;
+}
+
+void TModeration::ApplyMute(const std::string& Name, const std::string& Identity, std::chrono::seconds Duration,
+    const std::string& Reason, const std::string& MutedBy) {
+    TModerationMute Mute;
     Mute.Name = Name;
+    Mute.Identity = Identity;
     Mute.Reason = Reason;
-    Mute.Expires = Duration.count() <= 0 ? TSteadyClock::time_point::max() : TSteadyClock::now() + Duration;
+    Mute.MutedBy = MutedBy;
+    Mute.Permanent = Duration.count() <= 0;
+    if (!Mute.Permanent) {
+        Mute.Expires = std::chrono::system_clock::now() + Duration;
+    }
+    {
+        std::lock_guard Lock(mMutex);
+        AddMuteLocked(Mute);
+    }
+    SaveMutes();
+}
+
+int TModeration::RemoveMutes(const std::string& Name, const std::string& Identity) {
+    if (Name.empty() && Identity.empty()) {
+        return 0;
+    }
+    int Removed = 0;
+    {
+        std::lock_guard Lock(mMutex);
+        const auto Before = mMutes.size();
+        std::erase_if(mMutes, [&Name, &Identity](const TModerationMute& Mute) {
+            return MuteMatches(Mute, Name, Identity);
+        });
+        Removed = static_cast<int>(Before - mMutes.size());
+    }
+    if (Removed > 0) {
+        SaveMutes();
+    }
+    return Removed;
 }
 
 void TModeration::NoteChat(int ClientID) {
@@ -309,7 +440,9 @@ void TModeration::TickAfk(TServer& Server, TNetwork& Network) {
     if (Clients.empty()) {
         std::lock_guard Lock(mMutex);
         mActivity.clear();
-        mMutes.clear();
+        // Mutes are not client state: they stay until they expire or an
+        // operator lifts them, even if the server empties out.
+        PruneMutesLocked(std::chrono::system_clock::now());
         return;
     }
 
@@ -329,13 +462,7 @@ void TModeration::TickAfk(TServer& Server, TNetwork& Network) {
         for (const auto& Snapshot : Clients) {
             LiveIDs.insert(Snapshot.Client->GetID());
         }
-        for (auto It = mMutes.begin(); It != mMutes.end();) {
-            if (!LiveIDs.contains(It->first) || It->second.Expires <= Now) {
-                It = mMutes.erase(It);
-            } else {
-                ++It;
-            }
-        }
+        PruneMutesLocked(std::chrono::system_clock::now());
         for (auto It = mActivity.begin(); It != mActivity.end();) {
             It = LiveIDs.contains(It->first) ? std::next(It) : mActivity.erase(It);
         }
@@ -575,28 +702,19 @@ void TModeration::ExecuteCommand(const std::vector<std::string>& Args, const std
     }
 
     if (Sub == "mute") {
-        {
-            std::lock_guard Lock(mMutex);
-            auto& Mute = mMutes[Target->GetID()];
-            Mute.Name = Target->GetName();
-            Mute.Reason = Reason;
-            Mute.Expires = Duration.IsPermanent()
-                ? TSteadyClock::time_point::max()
-                : TSteadyClock::now() + Duration.Seconds;
-        }
+        // Stored by identity, so it still applies after a reconnect or a
+        // restart instead of dying with this client id.
+        ApplyMute(Target->GetName(), IdentityOf(*Target),
+            Duration.IsPermanent() ? std::chrono::seconds(0) : Duration.Seconds, Reason, Actor);
         Reply(fmt::format("Muted '{}' for {}. Reason: {}", Target->GetName(),
             Duration.IsPermanent() ? "permanent" : Moderation::FormatDuration(Duration.Seconds), Reason));
         return;
     }
 
     if (Sub == "unmute") {
-        bool WasMuted = false;
-        {
-            std::lock_guard Lock(mMutex);
-            WasMuted = mMutes.erase(Target->GetID()) > 0;
-        }
-        Reply(WasMuted ? fmt::format("Unmuted '{}'.", Target->GetName())
-                       : fmt::format("'{}' was not muted.", Target->GetName()));
+        const int Removed = RemoveMutes(Target->GetName(), IdentityOf(*Target));
+        Reply(Removed > 0 ? fmt::format("Unmuted '{}'.", Target->GetName())
+                          : fmt::format("'{}' was not muted.", Target->GetName()));
         return;
     }
 
@@ -729,6 +847,136 @@ void TModeration::SaveBans() const {
     }
 }
 
+std::filesystem::path TModeration::MuteFilePath() const {
+    // Mutes live next to the ban list so that both are moved, backed up and
+    // wiped together.
+    return BanFilePath().parent_path() / "RaspiMutes.json";
+}
+
+std::vector<TModerationMute> TModeration::ParseMutes(std::string_view Json) {
+    std::vector<TModerationMute> Mutes;
+    const auto Doc = nlohmann::json::parse(Json.begin(), Json.end(), nullptr, false);
+    if (Doc.is_discarded() || !Doc.is_object()) {
+        return Mutes;
+    }
+    const auto Entries = Doc.value("mutes", nlohmann::json::array());
+    if (!Entries.is_array()) {
+        return Mutes;
+    }
+    for (const auto& Entry : Entries) {
+        if (!Entry.is_object()) {
+            continue;
+        }
+        TModerationMute Mute;
+        Mute.Name = Entry.value("name", std::string { });
+        Mute.Identity = Entry.value("identity", std::string { });
+        Mute.Reason = Entry.value("reason", std::string { });
+        Mute.MutedBy = Entry.value("muted_by", std::string { });
+        Mute.Permanent = Entry.value("permanent", true);
+        if (!Mute.Permanent) {
+            Mute.Expires = std::chrono::system_clock::time_point(std::chrono::seconds(Entry.value("expires", int64_t { 0 })));
+        }
+        if (Mute.Name.empty() && Mute.Identity.empty()) {
+            continue; // cannot be matched to anybody
+        }
+        Mutes.push_back(std::move(Mute));
+    }
+    return Mutes;
+}
+
+std::string TModeration::SerializeMutes(const std::vector<TModerationMute>& Mutes) {
+    nlohmann::json Doc;
+    Doc["mutes"] = nlohmann::json::array();
+    for (const auto& Mute : Mutes) {
+        nlohmann::json Entry {
+            { "name", Mute.Name },
+            { "identity", Mute.Identity },
+            { "reason", Mute.Reason },
+            { "muted_by", Mute.MutedBy },
+            { "permanent", Mute.Permanent },
+        };
+        if (!Mute.Permanent) {
+            Entry["expires"] = std::chrono::duration_cast<std::chrono::seconds>(Mute.Expires.time_since_epoch()).count();
+        }
+        Doc["mutes"].push_back(std::move(Entry));
+    }
+    return Doc.dump(4);
+}
+
+void TModeration::LoadMutes() {
+    // Same switch as bans: turning off persistence stops both files being read
+    // and written, so a read-only or ephemeral container stays untouched.
+    if (!mConfig.Bans.Persist) {
+        return;
+    }
+    const auto Path = MuteFilePath();
+    std::error_code Ec;
+    if (!std::filesystem::exists(Path, Ec)) {
+        return;
+    }
+    std::ifstream File(Path);
+    if (!File) {
+        beammp_error("Failed to open mute list for reading: '" + Path.string() + "'");
+        return;
+    }
+    std::ostringstream Buffer;
+    Buffer << File.rdbuf();
+    auto Loaded = ParseMutes(Buffer.str());
+    size_t Total = 0;
+    {
+        std::lock_guard Lock(mMutex);
+        mMutes = std::move(Loaded);
+        Total = mMutes.size();
+        PruneMutesLocked(std::chrono::system_clock::now());
+    }
+    beammp_infof("Loaded {} mute(s) from '{}'", Total, Path.string());
+}
+
+void TModeration::SaveMutes() const {
+    if (!mConfig.Bans.Persist) {
+        return;
+    }
+    std::vector<TModerationMute> Active;
+    {
+        std::lock_guard Lock(mMutex);
+        const auto Now = std::chrono::system_clock::now();
+        for (const auto& Mute : mMutes) {
+            if (!Mute.Expired(Now)) {
+                Active.push_back(Mute);
+            }
+        }
+    }
+    const auto Path = MuteFilePath();
+    try {
+        std::ofstream File(Path, std::ios::trunc);
+        if (!File) {
+            beammp_error("Failed to open mute list for writing: '" + Path.string() + "'");
+            return;
+        }
+        File << SerializeMutes(Active);
+    } catch (const std::exception& e) {
+        beammp_error("Failed to write mute list '" + Path.string() + "': " + e.what());
+    }
+}
+
+void TModeration::PruneMutesLocked(std::chrono::system_clock::time_point Now) {
+    std::erase_if(mMutes, [Now](const TModerationMute& Mute) { return Mute.Expired(Now); });
+}
+
+void TModeration::AddMuteLocked(const TModerationMute& Mute) {
+    PruneMutesLocked(std::chrono::system_clock::now());
+    // Re-muting the same player replaces the old mute instead of stacking them,
+    // and lifts any mute stored under an older name of the same identity.
+    std::erase_if(mMutes, [&Mute](const TModerationMute& Existing) {
+        if (!Mute.Identity.empty() && Existing.Identity == Mute.Identity) {
+            return true;
+        }
+        return !Mute.Name.empty() && !Existing.Name.empty()
+            && Moderation::ToLower(Existing.Name) == Moderation::ToLower(Mute.Name);
+    });
+    mMutes.push_back(Mute);
+}
+
 void TModeration::PruneBansLocked(std::chrono::system_clock::time_point Now) {
     std::erase_if(mBans, [Now](const TModerationBan& Ban) { return Ban.Expired(Now); });
 }
@@ -746,6 +994,211 @@ void TModeration::AddBanLocked(const TModerationBan& Ban) {
         return !Ban.Name.empty() && Moderation::ToLower(Existing.Name) == Moderation::ToLower(Ban.Name);
     });
     mBans.push_back(Ban);
+}
+
+TEST_CASE("TModerationMute expiry") {
+    const auto Now = std::chrono::system_clock::time_point(std::chrono::seconds(1'700'000'000));
+
+    TModerationMute Permanent;
+    CHECK(Permanent.Expired(Now) == false);
+    CHECK(Permanent.RemainingText(Now) == "permanent");
+
+    TModerationMute Timed;
+    Timed.Permanent = false;
+    Timed.Expires = Now + std::chrono::minutes(5);
+    CHECK(Timed.Expired(Now) == false);
+    CHECK(Timed.RemainingText(Now) == "5m");
+
+    Timed.Expires = Now;
+    CHECK(Timed.Expired(Now));
+    Timed.Expires = Now - std::chrono::seconds(1);
+    CHECK(Timed.Expired(Now));
+}
+
+TEST_CASE("TModeration::MuteMatches") {
+    TModerationMute Mute;
+    Mute.Name = "SomeOne";
+    Mute.Identity = "12345";
+
+    SUBCASE("identity wins even after a rename") {
+        CHECK(TModeration::MuteMatches(Mute, "AnotherName", "12345"));
+    }
+    SUBCASE("name is the fallback when the identity is unknown") {
+        CHECK(TModeration::MuteMatches(Mute, "someone", ""));
+        CHECK(TModeration::MuteMatches(Mute, "SOMEONE", "99999"));
+    }
+    SUBCASE("other players do not match") {
+        CHECK_FALSE(TModeration::MuteMatches(Mute, "OtherPlayer", "99999"));
+        CHECK_FALSE(TModeration::MuteMatches(Mute, "", ""));
+    }
+}
+
+TEST_CASE("TModeration mute list round-trip") {
+    TModerationMute Permanent;
+    Permanent.Name = "Perma";
+    Permanent.Identity = "111";
+    Permanent.Reason = "spam";
+    Permanent.MutedBy = "console";
+
+    TModerationMute Timed;
+    Timed.Name = "Timed";
+    Timed.Reason = "filtered word";
+    Timed.MutedBy = "chat filter";
+    Timed.Permanent = false;
+    Timed.Expires = std::chrono::system_clock::time_point(std::chrono::seconds(1'800'000'000));
+
+    const auto Json = TModeration::SerializeMutes({ Permanent, Timed });
+    const auto Parsed = TModeration::ParseMutes(Json);
+
+    REQUIRE(Parsed.size() == 2);
+    CHECK(Parsed[0].Name == "Perma");
+    CHECK(Parsed[0].Identity == "111");
+    CHECK(Parsed[0].Reason == "spam");
+    CHECK(Parsed[0].MutedBy == "console");
+    CHECK(Parsed[0].Permanent);
+    CHECK(Parsed[1].Name == "Timed");
+    CHECK(Parsed[1].Reason == "filtered word");
+    CHECK(Parsed[1].MutedBy == "chat filter");
+    CHECK_FALSE(Parsed[1].Permanent);
+    CHECK(Parsed[1].Expires == Timed.Expires);
+}
+
+TEST_CASE("TModeration mute list ignores broken input") {
+    CHECK(TModeration::ParseMutes("").empty());
+    CHECK(TModeration::ParseMutes("not json").empty());
+    CHECK(TModeration::ParseMutes("[]").empty());
+    CHECK(TModeration::ParseMutes("{}").empty());
+    // An entry without a name or identity cannot be matched to a player.
+    CHECK(TModeration::ParseMutes(R"({"mutes":[{"reason":"no owner"}]})").empty());
+    // An empty file still reads as "no mutes" rather than as an error.
+    CHECK(TModeration::ParseMutes(R"({"mutes":[]})").empty());
+}
+
+TEST_CASE("TModeration mutes survive a restart") {
+    namespace fs = std::filesystem;
+    const auto Dir = fs::temp_directory_path() / "rh-moderation-mutes-test";
+    std::error_code Ec;
+    fs::remove_all(Dir, Ec);
+    fs::create_directories(Dir);
+
+    const auto ConfigPath = Dir / "RaspiConfig.toml";
+    {
+        std::ofstream File(ConfigPath);
+        REQUIRE(File.good());
+        File << "[Moderation]\n"
+                "Enabled = true\n"
+                "CommandPrefix = \"!\"\n"
+                "[Moderation.Bans]\n"
+                "Enabled = true\n"
+                "PersistToFile = true\n"
+                "File = \"RaspiBans.json\"\n";
+    }
+
+    auto& Mod = Application::Moderation();
+    Mod.Initialize(ConfigPath);
+    const auto NoMute = std::unordered_map<std::string, std::string> { };
+    CHECK_FALSE(Mod.MuteRemaining("Bob", NoMute).has_value());
+
+    Mod.ApplyMute("Bob", "4242", std::chrono::minutes(30), "spam", "console");
+    CHECK(fs::exists(Dir / "RaspiMutes.json"));
+
+    // Initializing again is what a restart does: in-memory state is thrown away
+    // and read back from the file.
+    Mod.Initialize(ConfigPath);
+    const auto BobIdentity = std::unordered_map<std::string, std::string> { { "beammp", "4242" } };
+    CHECK(Mod.MuteRemaining("Bob", BobIdentity).has_value());
+    // The identity follows the player even after a rename.
+    CHECK(Mod.MuteRemaining("BobRenamed", BobIdentity).has_value());
+    const auto AliceIdentity = std::unordered_map<std::string, std::string> { { "beammp", "1" } };
+    CHECK_FALSE(Mod.MuteRemaining("Alice", AliceIdentity).has_value());
+
+    // Lifting the mute has to survive a restart too.
+    CHECK(Mod.RemoveMutes("Bob", "4242") == 1);
+    Mod.Initialize(ConfigPath);
+    CHECK_FALSE(Mod.MuteRemaining("Bob", BobIdentity).has_value());
+
+    fs::remove_all(Dir, Ec);
+}
+
+TEST_CASE("TModeration reload applies settings but not Discord") {
+    namespace fs = std::filesystem;
+    const auto Dir = fs::temp_directory_path() / "rh-moderation-reload-test";
+    std::error_code Ec;
+    fs::remove_all(Dir, Ec);
+    fs::create_directories(Dir);
+    const auto ConfigPath = Dir / "RaspiConfig.toml";
+
+    const auto WriteConfig = [&ConfigPath](
+                                 const std::string& Operators, const std::string& ChatFilter, bool DiscordEnabled) {
+        std::ofstream File(ConfigPath, std::ios::trunc);
+        REQUIRE(File.good());
+        File << "[Moderation]\n"
+                "Enabled = true\n"
+                "CommandPrefix = \"!\"\n"
+             << Operators
+             << "[Moderation.Bans]\n"
+                "PersistToFile = false\n"
+             << ChatFilter
+             << "[Discord]\n"
+                "Enabled = "
+             << (DiscordEnabled ? "true" : "false") << "\n"
+             << "RelayUrl = \"https://relay.example\"\n";
+    };
+
+    auto& Mod = Application::Moderation();
+    WriteConfig("[[Moderation.Operators]]\nName = \"Raspi\"\nIP = \"\"\n",
+        "[Moderation.ChatFilter]\nEnabled = false\n", false);
+    Mod.Initialize(ConfigPath);
+    CHECK(Mod.IsOperator("Raspi", "1.2.3.4"));
+    CHECK_FALSE(Mod.IsOperator("NewOp", "1.2.3.4"));
+    CHECK(Mod.FilterMessage("this is badword").Action == EModerationFilterAction::Allow);
+    // Bridge off in the running server. The next edit turns it on in the file.
+    CHECK_FALSE(Mod.Config().Discord.Enabled);
+
+    // Edit the file the way an operator would, then reload.
+    WriteConfig("[[Moderation.Operators]]\nName = \"Raspi\"\nIP = \"\"\n\n"
+                "[[Moderation.Operators]]\nName = \"NewOp\"\nIP = \"\"\n",
+        "[Moderation.ChatFilter]\nEnabled = true\nAction = \"block\"\nWords = [\"badword\"]\n", true);
+
+    const auto First = Mod.Reload();
+    REQUIRE(First.Success);
+    CHECK(First.Error.empty());
+    CHECK(Mod.IsOperator("NewOp", "1.2.3.4"));
+    CHECK(Mod.FilterMessage("this is badword").Action == EModerationFilterAction::Block);
+
+    // Operator list, ChatFilter.Enabled, ChatFilter.Action, ChatFilter.Words.
+    CHECK(First.AppliedCount == 4);
+    // Discord needs a restart, so the running bridge keeps its settings.
+    CHECK(First.DiscordRestartRequired);
+    CHECK_FALSE(Mod.Config().Discord.Enabled);
+
+    // Nothing new to apply, but the pending [Discord] change is still reported.
+    const auto Second = Mod.Reload();
+    REQUIRE(Second.Success);
+    CHECK(Second.AppliedCount == 0);
+    CHECK(Second.DiscordRestartRequired);
+
+    // A broken edit must not throw away the config that is running.
+    {
+        std::ofstream File(ConfigPath, std::ios::trunc);
+        REQUIRE(File.good());
+        File << "[Moderation\nEnabled = \"unterminated\n";
+    }
+    const auto Broken = Mod.Reload();
+    CHECK_FALSE(Broken.Success);
+    CHECK_FALSE(Broken.Error.empty());
+    CHECK(Mod.IsOperator("NewOp", "1.2.3.4"));
+    CHECK(Mod.FilterMessage("this is badword").Action == EModerationFilterAction::Block);
+
+    // A valid edit still applies afterwards, including removing an operator.
+    WriteConfig("[[Moderation.Operators]]\nName = \"Raspi\"\nIP = \"\"\n",
+        "[Moderation.ChatFilter]\nEnabled = false\n", false);
+    const auto Third = Mod.Reload();
+    REQUIRE(Third.Success);
+    CHECK_FALSE(Mod.IsOperator("NewOp", "1.2.3.4"));
+    CHECK(Mod.FilterMessage("this is badword").Action == EModerationFilterAction::Allow);
+
+    fs::remove_all(Dir, Ec);
 }
 
 int TModeration::RemoveBansLocked(const std::string& Query) {

@@ -100,12 +100,28 @@ namespace {
 } // namespace
 
 TRaspiConfig TRaspiConfig::Load(const std::filesystem::path& Path) {
-    TRaspiConfig Config;
-
     if (!std::filesystem::exists(Path)) {
+        TRaspiConfig Config;
         beammp_info("No moderation config found, generating '" + Path.string() + "'");
         Config.FlushToFile(Path);
         return Config;
+    }
+
+    auto Result = TryLoad(Path);
+    if (!Result.Ok) {
+        beammp_error("RaspiConfig: failed to parse '" + Path.string() + "': " + Result.Error);
+        beammp_error("RaspiConfig: continuing with built-in moderation defaults");
+    }
+    return Result.Config;
+}
+
+TLoadResult TRaspiConfig::TryLoad(const std::filesystem::path& Path) {
+    TLoadResult Result;
+    TRaspiConfig Config;
+
+    if (!std::filesystem::exists(Path)) {
+        Result.Error = "the file does not exist";
+        return Result;
     }
 
     try {
@@ -156,7 +172,9 @@ TRaspiConfig TRaspiConfig::Load(const std::filesystem::path& Path) {
         const auto* Mod = FindValue(Data, "Moderation");
         if (Mod == nullptr) {
             beammp_warn("RaspiConfig: no [Moderation] table found, using defaults");
-            return Config;
+            Result.Config = std::move(Config);
+            Result.Ok = true;
+            return Result;
         }
 
         Config.Enabled = GetBool(*Mod, "Enabled", Config.Enabled);
@@ -241,12 +259,15 @@ TRaspiConfig TRaspiConfig::Load(const std::filesystem::path& Path) {
                 Config.DefaultMuteDuration);
             Config.DefaultMuteDuration = "10m";
         }
+        Result.Ok = true;
     } catch (const std::exception& e) {
-        beammp_error("RaspiConfig: failed to parse '" + Path.string() + "': " + e.what());
-        beammp_error("RaspiConfig: continuing with built-in moderation defaults");
+        Result.Error = e.what();
+        // Same as before: an unreadable file leaves the built-in defaults.
+        Config = TRaspiConfig { };
     }
 
-    return Config;
+    Result.Config = std::move(Config);
+    return Result;
 }
 
 void TRaspiConfig::FlushToFile(const std::filesystem::path& Path) const {
@@ -342,6 +363,8 @@ void TRaspiConfig::FlushToFile(const std::filesystem::path& Path) const {
     Out << "\n[Discord]\n"
            "# Chat bridge to the public Raspi Host Discord bot.\n"
            "# Disabled means no thread, socket or queue is created at all.\n"
+           "# Only read at startup. The console 'reload' command picks up the rest\n"
+           "# of this file while the server is running.\n"
            "Enabled = "
         << (Discord.Enabled ? "true" : "false") << "\n"
         << "# Address of the relay that the bot runs on. Leave empty until paired.\n"
@@ -569,4 +592,119 @@ TEST_CASE("Moderation::TRaspiConfig loads several operators") {
     CHECK(IsOperator("SecondAdmin", "198.51.100.9"));
     CHECK_FALSE(IsOperator("SecondAdmin", "192.0.2.1"));
     CHECK(IsOperator("raspi", "10.0.0.1"));
+}
+
+TEST_CASE("Moderation::TRaspiConfig::TryLoad") {
+    using namespace Moderation;
+    namespace fs = std::filesystem;
+    const auto Dir = fs::temp_directory_path() / "rh-tryload-test";
+    std::error_code Ec;
+    fs::remove_all(Dir, Ec);
+    fs::create_directories(Dir);
+
+    // A missing file is an error, and reading must not create it.
+    const auto MissingPath = Dir / "missing.toml";
+    const auto Missing = TRaspiConfig::TryLoad(MissingPath);
+    CHECK_FALSE(Missing.Ok);
+    CHECK_FALSE(Missing.Error.empty());
+    CHECK_FALSE(fs::exists(MissingPath));
+
+    const auto ValidPath = Dir / "valid.toml";
+    {
+        std::ofstream Out(ValidPath);
+        REQUIRE(Out.good());
+        Out << "[Moderation]\n"
+               "Enabled = false\n"
+               "[Moderation.Bans]\n"
+               "DefaultDuration = \"1h\"\n";
+    }
+    const auto Valid = TRaspiConfig::TryLoad(ValidPath);
+    CHECK(Valid.Ok);
+    CHECK(Valid.Error.empty());
+    CHECK_FALSE(Valid.Config.Enabled);
+    CHECK(Valid.Config.Bans.DefaultDuration == "1h");
+
+    // A broken file reports the parse error and falls back to the defaults, so
+    // the caller can keep the config it already has.
+    const auto BrokenPath = Dir / "broken.toml";
+    {
+        std::ofstream Out(BrokenPath);
+        REQUIRE(Out.good());
+        Out << "[Moderation\nEnabled = \"unterminated\n";
+    }
+    const auto Broken = TRaspiConfig::TryLoad(BrokenPath);
+    CHECK_FALSE(Broken.Ok);
+    CHECK_FALSE(Broken.Error.empty());
+    CHECK(Broken.Config.Enabled);
+    CHECK(Broken.Config.Bans.DefaultDuration == "permanent");
+
+    fs::remove_all(Dir, Ec);
+}
+
+TEST_CASE("Moderation::DiffConfigs") {
+    using namespace Moderation;
+    const TRaspiConfig Base;
+
+    CHECK(DiffConfigs(Base, Base).empty());
+
+    {
+        TRaspiConfig Changed = Base;
+        Changed.Bans.Enabled = false;
+        Changed.ChatFilter.Enabled = true;
+        Changed.ChatFilter.MuteMinutes = 15;
+        const auto Changes = DiffConfigs(Base, Changed);
+        REQUIRE(Changes.size() == 3u);
+        CHECK(Changes[0].Section == "Moderation.Bans");
+        CHECK(Changes[0].Text == "Moderation.Bans.Enabled: true -> false");
+        CHECK(Changes[1].Text == "Moderation.ChatFilter.Enabled: false -> true");
+        CHECK(Changes[2].Text == "Moderation.ChatFilter.MuteMinutes: 5 -> 15");
+    }
+
+    {
+        TRaspiConfig Changed = Base;
+        Changed.ChatFilter.Words = { "one", "two" };
+        Changed.Rules.Lines = { "be nice" };
+        const auto Changes = DiffConfigs(Base, Changed);
+        REQUIRE(Changes.size() == 2u);
+        CHECK(Changes[0].Text == "Moderation.ChatFilter.Words: 0 -> 2");
+        CHECK(Changes[1].Text == "Rules.Lines: 0 -> 1");
+    }
+
+    {
+        TRaspiConfig Changed = Base;
+        Changed.Operators.push_back(TRaspiConfig::TOperator { "Raspi", "" });
+        auto Changes = DiffConfigs(Base, Changed);
+        REQUIRE(Changes.size() == 1u);
+        CHECK(Changes[0].Text == "Moderation.Operators: none -> Raspi");
+
+        Changed.Operators.push_back(TRaspiConfig::TOperator { "Bob", "203.0.113.7" });
+        Changes = DiffConfigs(Base, Changed);
+        REQUIRE(Changes.size() == 1u);
+        CHECK(Changes[0].Text == "Moderation.Operators: none -> Raspi, Bob (203.0.113.7)");
+    }
+
+    {
+        // The pairing code is a credential: it must never be printed, only the
+        // fact that it changed.
+        TRaspiConfig Changed = Base;
+        Changed.Discord.PairingCode = "SECRET-CODE";
+        const auto Changes = DiffConfigs(Base, Changed);
+        REQUIRE(Changes.size() == 1u);
+        CHECK(Changes[0].Section == "Discord");
+        CHECK(Changes[0].Text == "Discord.PairingCode: changed");
+        CHECK(Changes[0].Text.find("SECRET-CODE") == std::string::npos);
+    }
+
+    {
+        // Clearing or filling a value has to be readable in the log too.
+        TRaspiConfig Changed = Base;
+        Changed.Discord.RelayUrl = "https://relay.example";
+        auto Changes = DiffConfigs(Base, Changed);
+        REQUIRE(Changes.size() == 1u);
+        CHECK(Changes[0].Text == "Discord.RelayUrl: (empty) -> https://relay.example");
+
+        Changes = DiffConfigs(Changed, Base);
+        REQUIRE(Changes.size() == 1u);
+        CHECK(Changes[0].Text == "Discord.RelayUrl: https://relay.example -> (empty)");
+    }
 }

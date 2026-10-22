@@ -27,6 +27,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -48,6 +49,23 @@ struct TModerationBan {
     [[nodiscard]] bool Expired(std::chrono::system_clock::time_point Now) const;
     /// Message sent to a rejected client, including remaining time.
     [[nodiscard]] std::string KickReason(std::chrono::system_clock::time_point Now) const;
+};
+
+/// A mute that outlives the session it was given in. The BeamMP account id is
+/// what makes that work: it stays the same across reconnects and restarts,
+/// while the client id is handed out per connection. The name is a fallback for
+/// players whose identity is not known.
+struct TModerationMute {
+    std::string Name;
+    std::string Identity;
+    std::string Reason;
+    std::string MutedBy;
+    bool Permanent { true };
+    std::chrono::system_clock::time_point Expires {};
+
+    [[nodiscard]] bool Expired(std::chrono::system_clock::time_point Now) const;
+    /// "12m 30s" for a timed mute, "permanent" for a permanent one.
+    [[nodiscard]] std::string RemainingText(std::chrono::system_clock::time_point Now) const;
 };
 
 enum class EModerationFilterAction {
@@ -77,6 +95,24 @@ public:
     /// Loads RaspiConfig.toml (creating it when missing) and the ban list.
     void Initialize(const std::filesystem::path& ConfigPath);
 
+    /// Result of Reload(): whether the file could be read, what changed, and
+    /// whether the server has to restart for [Discord].
+    struct TReloadReport {
+        bool Success { false };
+        std::string Error; ///< set when Success is false; the live config is untouched
+        std::vector<Moderation::TConfigChange> Changes;
+        /// How many of Changes were applied: everything except [Discord].
+        size_t AppliedCount { 0 };
+        /// True when [Discord] was edited. The bridge is built at startup, so
+        /// those settings are left alone.
+        bool DiscordRestartRequired { false };
+    };
+
+    /// Re-reads RaspiConfig.toml and applies it to the running server, along
+    /// with the ban and mute files. [Discord] is skipped, since the bridge is
+    /// only built at startup; those changes need a restart.
+    TReloadReport Reload();
+
     [[nodiscard]] bool Enabled() const;
     [[nodiscard]] const Moderation::TRaspiConfig& Config() const { return mConfig; }
     [[nodiscard]] bool IsOperator(const std::string& Name, const std::string& IP) const;
@@ -90,10 +126,28 @@ public:
     /// Applies the configured chat filter. Side-effect free.
     [[nodiscard]] TModerationFilterResult FilterMessage(const std::string& Message) const;
 
-    /// Remaining mute time if the client is muted.
-    [[nodiscard]] std::optional<std::string> MuteRemaining(int ClientID) const;
-    /// Applies a mute directly, used by the chat filter's "mute" action.
-    void ApplyMute(int ClientID, const std::string& Name, std::chrono::seconds Duration, const std::string& Reason);
+    /// Remaining mute time if this player is muted, looked up by identity first
+    /// and by name otherwise. Identity is what makes a mute survive a reconnect
+    /// and a server restart.
+    [[nodiscard]] std::optional<std::string> MuteRemaining(
+        const std::string& Name, const std::unordered_map<std::string, std::string>& Identifiers) const;
+    /// Applies (or replaces) a mute and writes it to disk. A duration of zero or
+    /// less means permanent. Used by the "mute" command and the chat filter.
+    void ApplyMute(const std::string& Name, const std::string& Identity, std::chrono::seconds Duration,
+        const std::string& Reason, const std::string& MutedBy);
+    /// Removes every mute matching this name or identity, and writes the result
+    /// back to disk. Returns how many were removed.
+    int RemoveMutes(const std::string& Name, const std::string& Identity);
+
+    /// The BeamMP account id when the client has one, otherwise empty.
+    [[nodiscard]] static std::string IdentityFromIdentifiers(
+        const std::unordered_map<std::string, std::string>& Identifiers);
+    [[nodiscard]] static bool MuteMatches(
+        const TModerationMute& Mute, const std::string& Name, const std::string& Identity);
+    /// The on-disk format of the mute list. Kept as plain functions so the
+    /// format can be tested without touching a file or the singleton.
+    [[nodiscard]] static std::vector<TModerationMute> ParseMutes(std::string_view Json);
+    [[nodiscard]] static std::string SerializeMutes(const std::vector<TModerationMute>& Mutes);
 
     /// Activity tracking for AFK enforcement.
     void NoteChat(int ClientID);
@@ -120,12 +174,6 @@ public:
     [[nodiscard]] static std::string HelpString();
 
 private:
-    struct TMute {
-        std::string Name;
-        std::string Reason;
-        std::chrono::steady_clock::time_point Expires {};
-    };
-
     struct TActivityState {
         std::chrono::steady_clock::time_point LastActivity {};
         std::string LastPosition;
@@ -133,17 +181,27 @@ private:
     };
 
     [[nodiscard]] std::filesystem::path BanFilePath() const;
+    /// "RaspiMutes.json" next to the ban list, so relocating the ban file moves
+    /// the mutes with it.
+    [[nodiscard]] std::filesystem::path MuteFilePath() const;
     void LoadBans();
     void SaveBans() const;
+    void LoadMutes();
+    void SaveMutes() const;
     void PruneBansLocked(std::chrono::system_clock::time_point Now);
+    void PruneMutesLocked(std::chrono::system_clock::time_point Now);
     void AddBanLocked(const TModerationBan& Ban);
+    void AddMuteLocked(const TModerationMute& Mute);
     int RemoveBansLocked(const std::string& Query);
 
     Moderation::TRaspiConfig mConfig;
     std::filesystem::path mConfigPath;
     std::vector<TModerationBan> mBans;
-    std::unordered_map<int, TMute> mMutes;
+    std::vector<TModerationMute> mMutes;
     std::unordered_map<int, TActivityState> mActivity;
     mutable std::mutex mMutex;
+    /// Serializes reloads. Only Reload() takes it, so it can be held for the
+    /// whole call.
+    std::mutex mReloadMutex;
     bool mInitialized { false };
 };
