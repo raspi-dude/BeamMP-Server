@@ -313,18 +313,59 @@ TLoadResult TRaspiConfig::TryLoad(const std::filesystem::path& Path) {
         }
 
         if (const auto* Operators = FindValue(*Mod, "Operators"); Operators != nullptr && Operators->is_array()) {
+            // The compact form lists the names and, in the same order, their IPs:
+            //   Operators = ["Raspi", "Bob"]
+            //   OperatorIPs = ["203.0.113.7", ""]
+            // An empty or missing IP means "any IP", and repeating a name with
+            // different IPs is how one person gets several pinned addresses.
+            std::vector<std::string> ListedIPs;
+            if (const auto* Ips = FindValue(*Mod, "OperatorIPs"); Ips != nullptr) {
+                if (!Ips->is_array()) {
+                    beammp_warn("RaspiConfig: 'OperatorIPs' must be an array of strings, ignoring it");
+                } else {
+                    for (const auto& Entry : Ips->as_array()) {
+                        if (!Entry.is_string()) {
+                            beammp_warn("RaspiConfig: every 'OperatorIPs' entry must be a string, using an empty IP");
+                            ListedIPs.emplace_back();
+                            continue;
+                        }
+                        ListedIPs.emplace_back(Trim(Entry.as_string()));
+                    }
+                }
+            }
+
+            std::size_t Index = 0;
             for (const auto& Entry : Operators->as_array()) {
-                if (!Entry.is_table()) {
-                    continue;
-                }
                 TOperator Op;
-                Op.Name = GetString(Entry, "Name", "");
-                Op.IP = GetString(Entry, "IP", "");
-                if (Op.Name.empty()) {
-                    beammp_warn("RaspiConfig: an operator entry has no Name, ignoring it");
-                    continue;
+                bool Usable = true;
+                if (Entry.is_string()) {
+                    Op.Name = std::string(Trim(Entry.as_string()));
+                    if (Index < ListedIPs.size()) {
+                        Op.IP = ListedIPs[Index];
+                    }
+                } else if (Entry.is_table()) {
+                    // The older [[Moderation.Operators]] form keeps working, so
+                    // existing files do not have to be rewritten by hand.
+                    Op.Name = GetString(Entry, "Name", "");
+                    Op.IP = GetString(Entry, "IP", "");
+                } else {
+                    beammp_warn("RaspiConfig: an operator entry must be a name or a [[Moderation.Operators]] table, ignoring it");
+                    Usable = false;
                 }
-                Config.Operators.push_back(Op);
+
+                if (Usable && Op.Name.empty()) {
+                    beammp_warn("RaspiConfig: an operator entry has no Name, ignoring it");
+                    Usable = false;
+                }
+                if (Usable) {
+                    Config.Operators.push_back(Op);
+                }
+                ++Index;
+            }
+
+            if (ListedIPs.size() > Operators->as_array().size()) {
+                beammp_warnf("RaspiConfig: 'OperatorIPs' has {} entries but 'Operators' only {}, ignoring the extras",
+                    ListedIPs.size(), Operators->as_array().size());
             }
         }
 
@@ -421,21 +462,30 @@ void TRaspiConfig::FlushToFile(const std::filesystem::path& Path) const {
            "DefaultMuteDuration = "
         << Quote(DefaultMuteDuration) << "\n"
         << "\n"
-           "# Players allowed to run in-game moderation commands.\n"
-           "# Set IP = \"\" to allow the name from any IP, or pin it to one address so\n"
-           "# a stolen account key cannot be used to moderate from elsewhere.\n";
+           "# Players allowed to run in-game moderation commands: the names, then\n"
+           "# the matching IPs in the same order. An empty IP allows that name from\n"
+           "# any address; pinning one means a stolen account key cannot moderate\n"
+           "# from elsewhere. Repeat a name to give it several pinned addresses.\n";
 
     if (Operators.empty()) {
-        Out << "\n# [[Moderation.Operators]]\n"
-               "# Name = \"YourBeamMPName\"\n"
-               "# IP = \"\"\n";
+        Out << "# Operators = [\"YourBeamMPName\"]\n"
+               "# OperatorIPs = [\"\"]\n";
     } else {
-        for (const auto& Operator : Operators) {
-            Out << "\n[[Moderation.Operators]]\n"
-                   "Name = "
-                << Quote(Operator.Name) << "\n"
-                << "IP = " << Quote(Operator.IP) << "\n";
+        Out << "Operators = [";
+        for (std::size_t i = 0; i < Operators.size(); ++i) {
+            if (i != 0) {
+                Out << ", ";
+            }
+            Out << Quote(Operators[i].Name);
         }
+        Out << "]\nOperatorIPs = [";
+        for (std::size_t i = 0; i < Operators.size(); ++i) {
+            if (i != 0) {
+                Out << ", ";
+            }
+            Out << Quote(Operators[i].IP);
+        }
+        Out << "]\n";
     }
 
     Out << "\n[Moderation.Bans]\n"
@@ -1203,4 +1253,86 @@ TEST_CASE("Moderation::WriteEnvOverrides rewrites only the overridden lines") {
     CHECK(WriteEnvOverrides(Path, Config, Overrides) == 0u);
 
     fs::remove(Path);
+}
+
+TEST_CASE("Moderation::TRaspiConfig loads operators from parallel lists") {
+    using namespace Moderation;
+    namespace fs = std::filesystem;
+
+    const auto Path = fs::temp_directory_path() / "rh-operator-lists-test.toml";
+    {
+        std::ofstream Out(Path);
+        REQUIRE(Out.good());
+        Out << "[Moderation]\n"
+               "Operators = [\"Raspi_dude\", \"Tax_Reports\", \"dustiboi9001\", \"Sec_Admin\"]\n"
+               "OperatorIPs = [\"203.0.113.7\", \"\", \"198.51.100.9\"]\n";
+    }
+
+    const auto Config = TRaspiConfig::Load(Path);
+    fs::remove(Path);
+
+    // The lists pair up by position. An empty IP and a missing IP both mean
+    // "any address", so a short list leaves the rest of the names unpinned.
+    REQUIRE(Config.Operators.size() == 4u);
+    CHECK(Config.Operators[0].Name == "Raspi_dude");
+    CHECK(Config.Operators[0].IP == "203.0.113.7");
+    CHECK(Config.Operators[1].Name == "Tax_Reports");
+    CHECK(Config.Operators[1].IP.empty());
+    CHECK(Config.Operators[2].IP == "198.51.100.9");
+    CHECK(Config.Operators[3].Name == "Sec_Admin");
+    CHECK(Config.Operators[3].IP.empty());
+
+    const auto IsOperator = [&Config](const std::string& Name, const std::string& Ip) {
+        return std::any_of(Config.Operators.begin(), Config.Operators.end(),
+            [&Name, &Ip](const TRaspiConfig::TOperator& Op) { return MatchesOperator(Name, Ip, Op.Name, Op.IP); });
+    };
+    CHECK(IsOperator("Raspi_dude", "203.0.113.7"));
+    CHECK_FALSE(IsOperator("Raspi_dude", "198.51.100.9")); // that IP belongs to another name
+    CHECK(IsOperator("dustiboi9001", "198.51.100.9"));
+    CHECK(IsOperator("tax_reports", "8.8.8.8")); // no IP pinned
+    CHECK(IsOperator("sec_admin", "192.0.2.55")); // no entry in the IP list at all
+
+    // One person, two pinned addresses: repeat the name and give each an IP.
+    {
+        std::ofstream Out(Path);
+        REQUIRE(Out.good());
+        Out << "[Moderation]\n"
+               "Operators = [\"Raspi_dude\", \"Raspi_dude\"]\n"
+               "OperatorIPs = [\"203.0.113.7\", \"198.51.100.9\"]\n";
+    }
+    const auto TwoAddresses = TRaspiConfig::Load(Path);
+    fs::remove(Path);
+    REQUIRE(TwoAddresses.Operators.size() == 2u);
+    const auto Matches = [&TwoAddresses](const std::string& Name, const std::string& Ip) {
+        return std::any_of(TwoAddresses.Operators.begin(), TwoAddresses.Operators.end(),
+            [&Name, &Ip](const TRaspiConfig::TOperator& Op) { return MatchesOperator(Name, Ip, Op.Name, Op.IP); });
+    };
+    CHECK(Matches("Raspi_dude", "203.0.113.7"));
+    CHECK(Matches("Raspi_dude", "198.51.100.9"));
+    CHECK_FALSE(Matches("Raspi_dude", "192.0.2.55"));
+}
+
+TEST_CASE("Moderation::TRaspiConfig writes operators as lists") {
+    using namespace Moderation;
+    namespace fs = std::filesystem;
+
+    const auto Path = fs::temp_directory_path() / "rh-operator-lists-write-test.toml";
+    TRaspiConfig Outgoing;
+    Outgoing.Operators.push_back(TRaspiConfig::TOperator { "Raspi_dude", "203.0.113.7" });
+    Outgoing.Operators.push_back(TRaspiConfig::TOperator { "Tax_Reports", "" });
+    Outgoing.FlushToFile(Path);
+
+    std::string Text = ReadAll(Path);
+    Text.erase(std::remove(Text.begin(), Text.end(), '\r'), Text.end());
+    CHECK(Text.find("Operators = [\"Raspi_dude\", \"Tax_Reports\"]\n") != std::string::npos);
+    CHECK(Text.find("OperatorIPs = [\"203.0.113.7\", \"\"]\n") != std::string::npos);
+
+    // What the server writes, it has to read back unchanged.
+    const auto Config = TRaspiConfig::Load(Path);
+    fs::remove(Path);
+    REQUIRE(Config.Operators.size() == 2u);
+    CHECK(Config.Operators[0].Name == "Raspi_dude");
+    CHECK(Config.Operators[0].IP == "203.0.113.7");
+    CHECK(Config.Operators[1].Name == "Tax_Reports");
+    CHECK(Config.Operators[1].IP.empty());
 }
