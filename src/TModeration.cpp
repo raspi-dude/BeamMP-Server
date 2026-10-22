@@ -373,14 +373,23 @@ void TModeration::TickAfk(TServer& Server, TNetwork& Network) {
 }
 
 bool TModeration::HandleRulesCommand(TClient& Sender, const std::string& Message, TNetwork& Network) {
+    // This runs for every chat line, so only the short command string is copied
+    // until the message actually is the rules command.
     std::string Command;
-    std::vector<std::string> Lines;
     {
         std::lock_guard Lock(mMutex);
         Command = mConfig.Rules.Command;
+    }
+    if (!Moderation::MatchesCommand(Message, Command)) {
+        return false;
+    }
+
+    std::vector<std::string> Lines;
+    {
+        std::lock_guard Lock(mMutex);
         Lines = mConfig.Rules.Lines;
     }
-    if (Lines.empty() || !Moderation::MatchesCommand(Message, Command)) {
+    if (Lines.empty()) {
         return false;
     }
 
