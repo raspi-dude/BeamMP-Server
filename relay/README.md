@@ -344,7 +344,12 @@ message arrives or the wait window expires, so an idle server costs no traffic.
   `[Discord] Name: message`, so server owners can follow Discord without
   alt-tabbing.
 - Server start/stop and player join/leave are posted as system lines. Turn them
-  off with `RelayEvents = false` in `RaspiConfig.toml`.
+  off with `RelayEvents = false` in `RaspiConfig.toml`. The restart only reports
+  "**Server stopped**" once the send has actually gone out, so a slow relay can
+  delay shutdown by up to three seconds.
+- A game server never replays the channel's backlog: on startup the bridge reads
+  the current cursor and ignores whatever was said while it was offline, then
+  delivers everything posted from then on.
 - Bot messages, webhooks and messages without a guild are ignored, which stops
   the `game -> Discord -> game` loop.
 - Mention parsing is disabled on send, so player text cannot ping `@everyone`.

@@ -160,6 +160,9 @@ struct TDiscordBridge::TState {
     mutable std::mutex Mutex;
     std::condition_variable CV;
     std::deque<TItem> Outgoing;
+    /// True while a message has been taken off the queue and is being sent, so
+    /// shutdown can wait for it instead of aborting the request mid-flight.
+    bool Sending { false };
     std::atomic<bool> Stop { false };
     TNetwork* Network { nullptr };
     uint64_t Cursor { 0 };
@@ -218,10 +221,17 @@ void TDiscordBridge::Shutdown() {
     auto& State = *mState;
     if (mSettings.RelayEvents) {
         EnqueueSystem("**Server stopped**");
-        // Give the sender a moment to get the farewell out before stopping. It
-        // is best effort: shutdown must never hang on the relay.
+        // Wait until the farewell has actually been sent, not just taken off the
+        // queue: setting Stop aborts any in-flight request, which is why the
+        // stop announcement used to vanish. Still best effort, so a dead relay
+        // delays shutdown by at most the timeout below.
         std::unique_lock Lock(State.Mutex);
-        State.CV.wait_for(Lock, std::chrono::seconds(3), [&State] { return State.Outgoing.empty(); });
+        const bool Sent = State.CV.wait_for(Lock, std::chrono::seconds(3), [&State] {
+            return State.Outgoing.empty() && !State.Sending;
+        });
+        if (!Sent) {
+            beammp_warn("Discord bridge: shutdown message could not be sent before the timeout");
+        }
     }
     State.Stop.store(true, std::memory_order_release);
     State.CV.notify_all();
@@ -341,6 +351,7 @@ void TDiscordBridge::SenderWorker() {
             }
             Item = std::move(State.Outgoing.front());
             State.Outgoing.pop_front();
+            State.Sending = true;
         }
 
         nlohmann::json Body {
@@ -363,6 +374,7 @@ void TDiscordBridge::SenderWorker() {
                 ++State.Sent;
                 State.SendFailures = 0;
                 State.LastError.clear();
+                State.Sending = false;
             }
             // Wakes Shutdown(), which waits for the queue to drain so the
             // "server stopped" line actually goes out.
@@ -383,6 +395,7 @@ void TDiscordBridge::SenderWorker() {
             ++State.SendFailures;
             Failures = State.SendFailures;
             State.LastError = DescribeRelayError(HttpStatus, Response);
+            State.Sending = false;
         }
         State.CV.notify_all();
         if (GiveUp) {
@@ -404,6 +417,12 @@ void TDiscordBridge::PollWorker() {
     auto& State = *mState;
     const std::string PollUrl = Endpoint(mSettings.RelayUrl, "/v1/relay/poll");
     const int PollWait = std::clamp(mSettings.PollWaitSeconds, 1, MaxPollWaitSeconds);
+
+    // The relay keeps a rolling buffer of the channel, and a fresh client asks
+    // with cursor 0 - which used to replay whatever was said while this server
+    // was last offline. The first successful answer only teaches us where "now"
+    // is; from then on everything newer is delivered.
+    bool Primed = false;
 
     while (!State.Stop.load(std::memory_order_acquire)) {
         nlohmann::json Body {
@@ -428,9 +447,16 @@ void TDiscordBridge::PollWorker() {
                     State.PollFailures = 0;
                     State.LastError.clear();
                 }
+                const bool SkipBacklog = !Primed;
+                Primed = true;
+                size_t Skipped = 0;
                 if (Doc.contains("messages") && Doc["messages"].is_array()) {
                     for (const auto& Element : Doc["messages"]) {
                         if (!Element.is_object()) {
+                            continue;
+                        }
+                        if (SkipBacklog) {
+                            ++Skipped;
                             continue;
                         }
                         const std::string Name = Element.value("name", std::string("Discord"));
@@ -439,6 +465,9 @@ void TDiscordBridge::PollWorker() {
                             Incoming.emplace_back(Name, Text);
                         }
                     }
+                }
+                if (Skipped > 0) {
+                    beammp_infof("Discord bridge: ignoring {} message(s) from before this server start", Skipped);
                 }
                 for (const auto& [Name, Text] : Incoming) {
                     // "Discord" is the sender so a Discord user cannot pretend
