@@ -80,6 +80,10 @@ public:
     // Optional Discord relay client. Allocates nothing until enabled and started.
     static TDiscordBridge& Discord();
     static std::string ServerVersionString();
+    /// The version as shown to the operator (boot line, --version, `version`
+    /// command), branded with the Raspi Host suffix. The plain version stays in
+    /// ServerVersionString() because the heartbeat sends that to the backend.
+    static std::string ServerVersionDisplayString() { return ServerVersionString() + "-raspihost"; }
     static const Version& ServerVersion() { return mVersion; }
     static Version ClientMinimumVersion() { return Version { 2, 7, 0 }; }
     static std::string PPS() { return mPPS; }

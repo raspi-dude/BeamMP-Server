@@ -58,6 +58,22 @@ std::string ProgressBar(double Fraction, size_t Width) {
     return Bar;
 }
 
+/// True when this zip has to be hashed: a new file, or one whose mtime/size no
+/// longer match what mods.json recorded. RefreshFiles uses the same check twice,
+/// once to decide whether to print the "checking mods" lines at all.
+bool ModNeedsHash(const std::filesystem::directory_entry& Entry, const nlohmann::json& ModsDB) {
+    const auto It = ModsDB.find(Entry.path().filename().string());
+    if (It == ModsDB.end() || !It->contains("lastwrite") || !It->contains("filesize")) {
+        return true;
+    }
+    try {
+        return Entry.last_write_time().time_since_epoch().count() > It->at("lastwrite").get<int64_t>()
+            || std::filesystem::file_size(Entry.path()) != It->at("filesize").get<size_t>();
+    } catch (const std::exception&) {
+        return true; // unreadable or malformed entry: hash it again
+    }
+}
+
 } // namespace
 
 TResourceManager::TResourceManager() {
@@ -83,11 +99,6 @@ TResourceManager::TResourceManager() {
         }
     }
 
-    if (mModsLoaded) {
-        beammp_infof("Found {} mod(s) ({}); checking them next - large files are hashed once and then cached",
-            mModsLoaded, HumanSize(mMaxModSize));
-    }
-
     Application::SetSubsystemStatus("ResourceManager", Application::Status::Good);
 }
 
@@ -100,8 +111,6 @@ void TResourceManager::RefreshFiles() {
     size_t HashedCount = 0;
     size_t CachedCount = 0;
 
-    beammp_info("Checking mods: unchanged files are loaded from mods.json, new or modified ones are hashed "
-                "(a large mod can take a while - the server is busy, not frozen)");
     nlohmann::json modsDB;
 
     if (std::filesystem::exists(Path + "/mods.json")) {
@@ -116,6 +125,27 @@ void TResourceManager::RefreshFiles() {
         }
     }
 
+    // A restart with unchanged mods is the normal case; it must not print three
+    // lines about hashing. Only changes get the detailed output.
+    bool Changes = false;
+    for (const auto& entry : fs::directory_iterator(Path)) {
+        if (entry.path().filename().string() == "mods.json"
+            || entry.path().extension() != ".zip" || std::filesystem::is_directory(entry.path())) {
+            continue;
+        }
+        if (ModNeedsHash(entry, modsDB)) {
+            Changes = true;
+            break;
+        }
+    }
+
+    if (Changes) {
+        beammp_infof("Found {} mod(s) ({}); checking them next - large files are hashed once and then cached",
+            mModsLoaded, HumanSize(mMaxModSize));
+        beammp_info("Checking mods: unchanged files are loaded from mods.json, new or modified ones are hashed "
+                    "(a large mod can take a while - the server is busy, not frozen)");
+    }
+
     for (const auto& entry : fs::directory_iterator(Path)) {
         std::string File(entry.path().string());
 
@@ -128,25 +158,26 @@ void TResourceManager::RefreshFiles() {
             continue;
         }
 
-        if (modsDB.contains(entry.path().filename().string())) {
-            auto& dbEntry = modsDB[entry.path().filename().string()];
-            if (entry.last_write_time().time_since_epoch().count() > dbEntry["lastwrite"] || std::filesystem::file_size(File) != dbEntry["filesize"].get<size_t>()) {
+        if (ModNeedsHash(entry, modsDB)) {
+            if (modsDB.contains(entry.path().filename().string())) {
                 beammp_infof("File '{}' has been modified, rehashing", File);
-            } else {
-                dbEntry["exists"] = true;
-
-                mMods.push_back(nlohmann::json {
-                    { "file_name", std::filesystem::path(File).filename() },
-                    { "file_size", std::filesystem::file_size(File) },
-                    { "hash_algorithm", "sha256" },
-                    { "hash", dbEntry["hash"] },
-                    { "protected", dbEntry["protected"] } });
-
-                beammp_debugf("Mod '{}' loaded from cache", File);
-                ++CachedCount;
-
-                continue;
             }
+        } else {
+            // unchanged: reuse the hash from mods.json instead of reading the zip
+            auto& dbEntry = modsDB[entry.path().filename().string()];
+            dbEntry["exists"] = true;
+
+            mMods.push_back(nlohmann::json {
+                { "file_name", std::filesystem::path(File).filename() },
+                { "file_size", std::filesystem::file_size(File) },
+                { "hash_algorithm", "sha256" },
+                { "hash", dbEntry["hash"] },
+                { "protected", dbEntry["protected"] } });
+
+            beammp_debugf("Mod '{}' loaded from cache", File);
+            ++CachedCount;
+
+            continue;
         }
 
         try {
@@ -255,10 +286,52 @@ void TResourceManager::RefreshFiles() {
         beammp_error("Failed to update mod DB: " + std::string(e.what()));
     }
 
-    if (HashedCount > 0 || CachedCount > 0) {
+    if (Changes) {
         beammp_infof("Mod check finished: {} hashed, {} from cache, {:.1f}s total", HashedCount, CachedCount,
             std::chrono::duration<double>(std::chrono::steady_clock::now() - StartTime).count());
+    } else if (mModsLoaded > 0) {
+        beammp_infof("Loaded {} mod(s) ({}) from cache - unchanged since the last start", mModsLoaded,
+            HumanSize(mMaxModSize));
     }
+}
+
+TEST_CASE("ResourceManager::ModNeedsHash") {
+    const auto Dir = fs::temp_directory_path() / "rh-mod-needs-hash";
+    std::error_code Ec;
+    fs::remove_all(Dir, Ec);
+    fs::create_directories(Dir, Ec);
+    {
+        std::ofstream(Dir / "a.zip") << "x";
+    }
+    const fs::directory_entry Entry(Dir / "a.zip");
+
+    nlohmann::json ModsDB = nlohmann::json::object();
+    // not in mods.json yet
+    CHECK(ModNeedsHash(Entry, ModsDB));
+
+    ModsDB["a.zip"] = {
+        { "lastwrite", Entry.last_write_time().time_since_epoch().count() },
+        { "filesize", 1 },
+    };
+    CHECK_FALSE(ModNeedsHash(Entry, ModsDB));
+
+    // a different size means the file was replaced
+    ModsDB["a.zip"]["filesize"] = 2;
+    CHECK(ModNeedsHash(Entry, ModsDB));
+
+    // an older mtime than the file means it was modified
+    ModsDB["a.zip"]["filesize"] = 1;
+    ModsDB["a.zip"]["lastwrite"] = int64_t(0);
+    CHECK(ModNeedsHash(Entry, ModsDB));
+
+    // malformed entries are re-hashed instead of throwing
+    ModsDB["a.zip"] = { { "lastwrite", "not-a-number" }, { "filesize", 1 } };
+    CHECK(ModNeedsHash(Entry, ModsDB));
+    // an entry missing one of the fields counts as changed too
+    ModsDB["a.zip"] = { { "filesize", 1 } };
+    CHECK(ModNeedsHash(Entry, ModsDB));
+
+    fs::remove_all(Dir, Ec);
 }
 
 TEST_CASE("ResourceManager::HumanSize") {

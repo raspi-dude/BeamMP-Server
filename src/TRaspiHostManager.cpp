@@ -26,6 +26,8 @@
 #include <ctime>
 #include <fstream>
 #include <sstream>
+#include <string>
+#include <vector>
 
 namespace {
 
@@ -96,6 +98,19 @@ void WarnAboutLegacyPlugin(const std::filesystem::path& ServerResourceDir) {
             beammp_warnf("[Raspi Host] the old manager plugin {} is still installed and keeps running its own timer; delete it so only the built-in manager acts", It->path().string());
         }
     }
+}
+
+/// Columns a string occupies in a terminal: one per code point, so the box
+/// stays square with UTF-8 text such as the em dashes in the title.
+/// http://www.unicode.org/reports/tr11/ widths are not needed here.
+size_t DisplayWidth(const std::string& Text) {
+    size_t Width = 0;
+    for (const unsigned char Byte : Text) {
+        if ((Byte & 0xC0) != 0x80) { // count lead bytes, skip continuation bytes
+            ++Width;
+        }
+    }
+    return Width;
 }
 
 int64_t AsInt64(const std::string& Text, int64_t Fallback) {
@@ -217,19 +232,32 @@ std::string TRaspiHostManager::ShutdownDescription() const {
 }
 
 void TRaspiHostManager::PrintBanner(int64_t PreviousLastOnline) const {
-    std::ostringstream Out;
-    Out << "########################################################################\n"
-        << "#                    ——— Raspi Host server manager ———                  #\n"
-        << "#  Plan: " << TierName(mTier) << "\n"
-        << "#  Inactivity shutdown: " << ShutdownDescription() << "\n"
-        << "#  Last accessed: " << FormatTimestamp(PreviousLastOnline, NowSeconds()) << "\n";
+    // Every line is logged on its own: the console prepends the timestamp to the
+    // first line of a message only, which pushed the top border to the right and
+    // left the rest of the box unaligned in the Pterodactyl console.
+    std::vector<std::string> Lines {
+        "——— Raspi Host server manager ———",
+        "Plan: " + std::string(TierName(mTier)),
+        "Inactivity shutdown: " + ShutdownDescription(),
+        "Last accessed: " + FormatTimestamp(PreviousLastOnline, NowSeconds()),
+    };
     if (WantsUpsell(mTier)) {
-        Out << "#  Want 24/7 uptime and better performance? Consider one of our paid plans!\n";
+        Lines.emplace_back("Want 24/7 uptime and better performance? Consider one of our paid plans!");
     } else {
-        Out << "#  Thank you for choosing Raspi Host!\n";
+        Lines.emplace_back("Thank you for choosing Raspi Host!");
     }
-    Out << "########################################################################";
-    beammp_info(Out.str());
+
+    size_t Width = 0;
+    for (const auto& Line : Lines) {
+        Width = (std::max)(Width, DisplayWidth(Line));
+    }
+
+    const std::string Bar(Width + 4, '#');
+    beammp_info(Bar);
+    for (const auto& Line : Lines) {
+        beammp_info("# " + Line + std::string(Width - DisplayWidth(Line), ' ') + " #");
+    }
+    beammp_info(Bar);
 }
 
 void TRaspiHostManager::Initialize(ETier Tier, const std::filesystem::path& ConfigDir,
@@ -281,12 +309,6 @@ void TRaspiHostManager::Initialize(ETier Tier, const std::filesystem::path& Conf
         std::filesystem::remove(LegacyStatsFile.parent_path(), RemoveEc);
         beammp_infof("[Raspi Host] Moved the old stats file to {}", mStatsPath.string());
     }
-
-    std::error_code AbsoluteEc;
-    const auto AbsoluteStatsPath = std::filesystem::absolute(mStatsPath, AbsoluteEc);
-    beammp_infof("[Raspi Host] Plan '{}'; inactivity shutdown: {}", TierName(mTier), ShutdownDescription());
-    beammp_infof("[Raspi Host] Usage data: {} (stats tracking {})",
-        (AbsoluteEc ? mStatsPath : AbsoluteStatsPath).string(), mStats.Enabled ? "ENABLED" : "DISABLED");
 
     mInitialized = true;
 }
@@ -386,6 +408,14 @@ bool TRaspiHostManager::TickWithElapsed(size_t PlayersOnline, int ElapsedSeconds
     beammp_infof("[Raspi Host] Time limit reached ({} min empty). Shutting down...", mShutdownSeconds / 60);
     SaveStats();
     return true;
+}
+
+TEST_CASE("TRaspiHostManager::banner width counts UTF-8 code points") {
+    CHECK(DisplayWidth("") == 0);
+    CHECK(DisplayWidth("Plan: Free") == 10);
+    // three em dashes, three bytes each: three columns, not nine
+    CHECK(DisplayWidth("———") == 3);
+    CHECK(DisplayWidth("——— Raspi Host server manager ———") == 33);
 }
 
 TEST_CASE("TRaspiHostManager::ShutdownSecondsFor") {

@@ -119,7 +119,7 @@ int BeamMPServerMain(MainArguments Arguments) {
         return 0;
     }
     if (Parser.FoundArgument({ "version" })) {
-        Application::Console().WriteRaw("BeamMP-Server v" + Application::ServerVersionString());
+        Application::Console().WriteRaw("BeamMP-Server v" + Application::ServerVersionDisplayString());
         return 0;
     }
 
@@ -187,10 +187,6 @@ int BeamMPServerMain(MainArguments Arguments) {
 
     Config.PrintDebug();
 
-    // Built-in moderation lives in its own config file next to ServerConfig.toml,
-    // so it gets generated and loaded before any client can connect.
-    Application::Moderation().Initialize(fs::path(ConfigPath).parent_path() / "RaspiConfig.toml");
-
     Application::InitializeConsole();
     Application::Console().StartLoggingToFile();
 
@@ -207,6 +203,11 @@ int BeamMPServerMain(MainArguments Arguments) {
     Application::RegisterShutdownHandler([&RaspiHostManager] {
         RaspiHostManager.SaveStats();
     });
+
+    // Built-in moderation lives in its own config file next to ServerConfig.toml,
+    // so it gets generated and loaded before any client can connect. It runs
+    // after the manager on purpose: its messages belong below the banner.
+    Application::Moderation().Initialize(fs::path(ConfigPath).parent_path() / "RaspiConfig.toml");
 
     Application::SetSubsystemStatus("Main", Application::Status::Starting);
 

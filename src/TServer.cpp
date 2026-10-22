@@ -123,7 +123,7 @@ TEST_CASE("GetPidVid") {
     }
 }
 TServer::TServer(const std::vector<std::string_view>& Arguments) {
-    beammp_info("BeamMP Server v" + Application::ServerVersionString());
+    beammp_info("BeamMP Server v" + Application::ServerVersionDisplayString());
     Application::SetSubsystemStatus("Server", Application::Status::Starting);
     std::mt19937_64 TimeSyncRandomDevice(std::random_device{}());
 
