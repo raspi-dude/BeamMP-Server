@@ -32,6 +32,7 @@
 #include "TPPSMonitor.h"
 #include "TPluginMonitor.h"
 #include "TResourceManager.h"
+#include "TRaspiHostManager.h"
 #include "TServer.h"
 
 #include <cstdint>
@@ -59,6 +60,11 @@ ARGUMENTS:
                         including the path given in --config.
     --version
                         Prints version info and exits.
+    --free | --eco | --performance
+                        Raspi Host plan this server runs on. Free shuts
+                        an empty server down after 15 minutes, eco after
+                        60 minutes, performance never. Without a flag the
+                        server runs as free and says so in the log.
 
 EXAMPLES:
     BeamMP-Server --config=../MyWestCoastServerConfig.toml
@@ -101,6 +107,9 @@ int BeamMPServerMain(MainArguments Arguments) {
     Parser.RegisterArgument({ "config" }, ArgsParser::HAS_VALUE);
     Parser.RegisterArgument({ "port" }, ArgsParser::HAS_VALUE);
     Parser.RegisterArgument({ "working-directory" }, ArgsParser::HAS_VALUE);
+    Parser.RegisterArgument({ "free" }, ArgsParser::NONE);
+    Parser.RegisterArgument({ "eco" }, ArgsParser::NONE);
+    Parser.RegisterArgument({ "performance" }, ArgsParser::NONE);
     Parser.Parse(Arguments.List);
     if (!Parser.Verify()) {
         return 1;
@@ -112,6 +121,22 @@ int BeamMPServerMain(MainArguments Arguments) {
     if (Parser.FoundArgument({ "version" })) {
         Application::Console().WriteRaw("BeamMP-Server v" + Application::ServerVersionString());
         return 0;
+    }
+
+    // Exactly one plan flag, so an egg cannot silently run in the wrong tier.
+    const bool FreeFlag = Parser.FoundArgument({ "free" });
+    const bool EcoFlag = Parser.FoundArgument({ "eco" });
+    const bool PerformanceFlag = Parser.FoundArgument({ "performance" });
+    const int TierFlags = int(FreeFlag) + int(EcoFlag) + int(PerformanceFlag);
+    if (TierFlags > 1) {
+        beammp_error("Pass only one of --free, --eco or --performance.");
+        return 1;
+    }
+    TRaspiHostManager::ETier Tier = TRaspiHostManager::ETier::Free;
+    if (EcoFlag) {
+        Tier = TRaspiHostManager::ETier::Eco;
+    } else if (PerformanceFlag) {
+        Tier = TRaspiHostManager::ETier::Performance;
     }
 
     std::string ConfigPath = "ServerConfig.toml";
@@ -168,6 +193,20 @@ int BeamMPServerMain(MainArguments Arguments) {
 
     Application::InitializeConsole();
     Application::Console().StartLoggingToFile();
+
+    if (TierFlags == 0) {
+        beammp_warn("[Raspi Host] No plan flag given; running as free (15 minute inactivity shutdown). "
+                    "Add --free, --eco or --performance to this server's startup command.");
+    }
+
+    // The old manager was a Lua plugin; its stats file is migrated here so the
+    // access time the cleanup relies on survives the move out of Resources/Server.
+    TRaspiHostManager RaspiHostManager;
+    RaspiHostManager.Initialize(Tier, fs::path(ConfigPath).parent_path(),
+        fs::path(Application::Settings.getAsString(Settings::Key::General_ResourceFolder)) / "Server" / "RaspiHostUtilsLogs" / "DO-NOT-DELETE");
+    Application::RegisterShutdownHandler([&RaspiHostManager] {
+        RaspiHostManager.SaveStats();
+    });
 
     Application::SetSubsystemStatus("Main", Application::Status::Starting);
 
@@ -264,6 +303,9 @@ int BeamMPServerMain(MainArguments Arguments) {
                     beammp_error("STARTUP NOT SUCCESSFUL, SYSTEMS " + SystemsBadList + " HAD ERRORS. THIS MAY OR MAY NOT CAUSE ISSUES.");
                 }
             }
+        }
+        if (RaspiHostManager.Tick(Server.ClientCount())) {
+            Application::GracefullyShutdown();
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }

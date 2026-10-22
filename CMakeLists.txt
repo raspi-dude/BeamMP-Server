@@ -77,6 +77,7 @@ set(PRJ_SOURCES
     src/TPluginMonitor.cpp
     src/TPPSMonitor.cpp
     src/TRaspiConfig.cpp
+    src/TRaspiHostManager.cpp
     src/TResourceManager.cpp
     src/TScopedTimer.cpp
     src/TServer.cpp
