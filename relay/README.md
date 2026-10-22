@@ -209,8 +209,9 @@ IPs, not anything Docker-side.
 #### Relay inside a Pterodactyl (Wings) server
 
 Wings runs the relay on its own `pterodactyl0` bridge and maps an allocation
-`<node-ip>:<port>` to the **same port** inside the container, so start the relay
-with `PORT=$SERVER_PORT` in the egg's startup command. Then:
+`<node-ip>:<port>` to the **same port** inside the container, so the egg's
+startup command has to bind that port — `PORT={{SERVER_PORT}} npm start`, or
+`PORT=$SERVER_PORT` if your startup is executed through a shell. Then:
 
 | Setting | Value |
 |---|---|
@@ -225,8 +226,8 @@ For `trustedProxies`, do not guess — ask the relay. A request that is not
 allowlisted logs the address it resolved and returns it in the 403 body:
 
 ```
-[warn] refused /v1/relay/send from 172.19.0.2: not in allowedIps
-{"error":"ip_not_allowed","message":"... Your IP (172.19.0.2) ..."}
+[2026-10-22T04:20:00.000Z] [warn] refused /v1/relay/send from 172.19.0.2: not in allowedIps
+{"ok":false,"error":"ip_not_allowed","message":"... Your IP (172.19.0.2) ..."}
 ```
 
 That address is NPM's own container on its compose network (Docker picks a
