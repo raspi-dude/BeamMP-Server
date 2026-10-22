@@ -206,6 +206,40 @@ depends on Docker's NAT and is a poor thing to pin a security decision to.
 `allowedIps` is unaffected: it still lists the **game servers'** public egress
 IPs, not anything Docker-side.
 
+#### Relay inside a Pterodactyl (Wings) server
+
+Wings runs the relay on its own `pterodactyl0` bridge and maps an allocation
+`<node-ip>:<port>` to the **same port** inside the container, so start the relay
+with `PORT=$SERVER_PORT` in the egg's startup command. Then:
+
+| Setting | Value |
+|---|---|
+| NPM Forward Hostname/IP | the allocation IP of the node, e.g. `203.0.113.20` |
+| NPM Forward Port | the allocated port, the same number the relay binds |
+| `trustedProxies` | the address the relay sees as its peer — see below |
+
+There is no name to forward to: `pterodactyl0` is not shared with NPM's compose
+network, and a Wings container's IP changes whenever the server is recreated.
+
+For `trustedProxies`, do not guess — ask the relay. A request that is not
+allowlisted logs the address it resolved and returns it in the 403 body:
+
+```
+[warn] refused /v1/relay/send from 172.19.0.2: not in allowedIps
+{"error":"ip_not_allowed","message":"... Your IP (172.19.0.2) ..."}
+```
+
+That address is NPM's own container on its compose network (Docker picks a
+subnet that does not collide with `pterodactyl0`, so `172.19.x` or similar), or
+`172.18.0.1` if NPM runs in host network mode. Put it in `trustedProxies`, or
+that whole compose subnet if NPM's address is not pinned.
+
+If the game servers are Pterodactyl servers on the **same node**, they share
+`pterodactyl0` with the relay, so `RelayUrl` can point straight at the relay's
+container address and no proxy, certificate or `trustProxy` is involved — the
+code then travels only inside the node's bridge. That breaks as soon as the
+relay is recreated or moves nodes, so it is a convenience, not the design.
+
 Details that matter here:
 
 - NPM appends with `$proxy_add_x_forwarded_for`, so a client-supplied
