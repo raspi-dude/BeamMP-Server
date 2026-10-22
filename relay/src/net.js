@@ -96,22 +96,45 @@ export class IpAllowList {
  * The rightmost entry is the address our proxy actually saw. Reading the first
  * one would let anyone walk past `allowedIps` by forging a header, and would
  * let one caller reset another's rate limit.
+ *
+ * `trustedProxies` narrows the trust to the peers that may send that header,
+ * like nginx's `set_real_ip_from`. A direct connection to the relay port then
+ * cannot forge anything, even with `trustProxy` on. Setting the list implies
+ * trust for those peers; the plain `trustProxy` flag stays as "trust whoever
+ * connects", which is what a network-isolated deployment needs.
+ *
+ * @param {object} req
+ * @param {{trustProxy?: boolean, trustedProxies?: IpAllowList|null}} [options]
  */
-export function clientIp(req, { trustProxy = false } = {}) {
-  if (trustProxy) {
-    const forwarded = req.headers['x-forwarded-for'];
-    const rawForwarded = Array.isArray(forwarded) ? forwarded.join(',') : forwarded;
-    const entries = String(rawForwarded ?? '').split(',').reverse();
-    for (const entry of entries) {
-      const candidate = normalizeIp(entry.trim());
-      if (candidate && net.isIP(candidate)) {
-        return candidate;
-      }
-    }
-    const realIp = normalizeIp(req.headers['x-real-ip']);
-    if (realIp && net.isIP(realIp)) {
-      return realIp;
-    }
+export function clientIp(req, { trustProxy = false, trustedProxies = null } = {}) {
+  const peer = normalizeIp(req.socket?.remoteAddress ?? '');
+  const proxyList = trustedProxies?.locked ? trustedProxies : null;
+  if (!(proxyList ? proxyList.allows(peer) : trustProxy)) {
+    return peer;
   }
-  return normalizeIp(req.socket?.remoteAddress ?? '');
+
+  const forwarded = req.headers['x-forwarded-for'];
+  const rawForwarded = Array.isArray(forwarded) ? forwarded.join(',') : forwarded;
+  const entries = String(rawForwarded ?? '')
+    .split(',')
+    .map((entry) => normalizeIp(entry.trim()))
+    .filter((entry) => entry && net.isIP(entry));
+
+  // Walk right to left past our own proxies: the first hop that is not one of
+  // them is the furthest address we can vouch for.
+  for (let i = entries.length - 1; i >= 0; --i) {
+    if (proxyList && proxyList.allows(entries[i])) {
+      continue;
+    }
+    return entries[i];
+  }
+  if (entries.length > 0) {
+    return entries[0];
+  }
+
+  const realIp = normalizeIp(req.headers['x-real-ip']);
+  if (realIp && net.isIP(realIp)) {
+    return realIp;
+  }
+  return peer;
 }

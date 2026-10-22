@@ -46,6 +46,7 @@ function readJsonBody(req) {
  * @param {(pairing: object, msg: {name?: string, message: string, system?: boolean}) => Promise<void>} options.sendToDiscord
  * @param {import('./net.js').IpAllowList} [options.ipLock] refuse anything not on this list
  * @param {boolean} [options.trustProxy] honour X-Forwarded-For for the client IP
+ * @param {import('./net.js').IpAllowList} [options.trustedProxies] only these peers may send that header
  * @param {import('./rate-limit.js').RateLimiter} [options.perPairingLimiter] limits game -> Discord messages
  * @param {import('./rate-limit.js').RateLimiter} [options.perIpLimiter] limits all relay traffic per IP
  */
@@ -55,6 +56,7 @@ export function createRelayServer({
   log = () => {},
   ipLock = null,
   trustProxy = false,
+  trustedProxies = null,
   perPairingLimiter = null,
   perIpLimiter = null,
 }) {
@@ -74,7 +76,7 @@ export function createRelayServer({
         return sendJson(res, 404, { ok: false, error: 'not found' });
       }
 
-      const ip = clientIp(req, { trustProxy });
+      const ip = clientIp(req, { trustProxy, trustedProxies });
 
       if (ipLock && !ipLock.allows(ip)) {
         log('warn', `refused ${req.url} from ${ip || 'unknown IP'}: not in allowedIps`);

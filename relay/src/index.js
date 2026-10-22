@@ -83,6 +83,9 @@ for (const line of describeConfig(config).split('\n')) {
 if (!config.ipLock.locked) {
   log('warn', 'This relay accepts game servers from ANY IP. Set allowedIps in relay/config.json to lock it to your hosting IPs.');
 }
+if (config.trustProxy && !config.proxyLock.locked) {
+  log('warn', 'trustProxy trusts X-Forwarded-For from every peer. Set trustedProxies (e.g. ["127.0.0.1"]) unless port ' + config.port + ' is unreachable except through the proxy.');
+}
 
 const bot = await createBot({
   core,
@@ -98,6 +101,7 @@ const server = createRelayServer({
   log,
   ipLock: config.ipLock,
   trustProxy: config.trustProxy,
+  trustedProxies: config.proxyLock,
   perPairingLimiter: new RateLimiter({
     windowSeconds: config.rateLimit.perPairing.windowSeconds,
     max: config.rateLimit.perPairing.maxMessages,

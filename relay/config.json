@@ -6,6 +6,7 @@
   "publicUrl": "https://relay.example.com",
   "allowedIps": [],
   "trustProxy": false,
+  "trustedProxies": [],
   "rateLimit": {
     "perPairing": {
       "windowSeconds": 10,

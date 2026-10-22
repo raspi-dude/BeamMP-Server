@@ -20,6 +20,11 @@ export const DEFAULT_CONFIG = {
   // rightmost entry (the one the proxy appended) is used, so a client-sent
   // header cannot pass `allowedIps`.
   trustProxy: false,
+  // The peers allowed to send X-Forwarded-For at all, like nginx's
+  // `set_real_ip_from`. Empty means "whoever can reach the port", which is fine
+  // when the relay itself is only reachable through the proxy (bound to
+  // 127.0.0.1 or firewalled), but not otherwise.
+  trustedProxies: [],
   rateLimit: {
     // Per pairing code: game chat. 30 lines per 10s is far above real chat.
     perPairing: { windowSeconds: 10, maxMessages: 30 },
@@ -100,6 +105,9 @@ export function loadConfig(env = process.env, configPath = null) {
       ? asIpList(env.RELAY_ALLOWED_IPS, 'RELAY_ALLOWED_IPS')
       : asIpList(fromFile.allowedIps, 'allowedIps'),
     trustProxy: asBoolean(env.RELAY_TRUST_PROXY, asBoolean(fromFile.trustProxy, DEFAULT_CONFIG.trustProxy, 'trustProxy'), 'RELAY_TRUST_PROXY'),
+    trustedProxies: asIpList(env.RELAY_TRUSTED_PROXIES, 'RELAY_TRUSTED_PROXIES').length > 0
+      ? asIpList(env.RELAY_TRUSTED_PROXIES, 'RELAY_TRUSTED_PROXIES')
+      : asIpList(fromFile.trustedProxies, 'trustedProxies'),
     rateLimit: {
       perPairing: {
         windowSeconds: toPositiveInt(perPairing.windowSeconds, DEFAULT_CONFIG.rateLimit.perPairing.windowSeconds, 'rateLimit.perPairing.windowSeconds'),
@@ -119,6 +127,8 @@ export function loadConfig(env = process.env, configPath = null) {
   // Throws on a malformed entry, which is much better than silently allowing
   // nobody (or everybody) because of a typo.
   config.ipLock = new IpAllowList(config.allowedIps);
+  // Same validation, so a typo in a proxy address fails loudly too.
+  config.proxyLock = new IpAllowList(config.trustedProxies);
   return config;
 }
 
@@ -129,7 +139,12 @@ export function describeConfig(config) {
   lines.push(config.ipLock.locked
     ? `ip lock: on (${config.allowedIps.join(', ')})`
     : 'ip lock: OFF - any IP may use this relay. Set allowedIps to restrict it.');
-  lines.push(`trust proxy headers: ${config.trustProxy ? 'yes' : 'no'}`);
+  lines.push(config.trustProxy ? 'trust proxy headers: yes' : 'trust proxy headers: no');
+  if (config.trustProxy || config.proxyLock.locked) {
+    lines.push(config.proxyLock.locked
+      ? `trusted proxies: ${config.trustedProxies.join(', ')}`
+      : 'trusted proxies: any peer - set trustedProxies if the relay port is reachable directly');
+  }
   lines.push(`rate limit: ${config.rateLimit.perPairing.maxMessages} messages/${config.rateLimit.perPairing.windowSeconds}s per pairing, ${config.rateLimit.perIp.maxRequests} requests/${config.rateLimit.perIp.windowSeconds}s per IP`);
   lines.push(config.publicUrl ? `public url: ${config.publicUrl}` : 'public url: not set - /pair will print a placeholder');
   return lines.join('\n');

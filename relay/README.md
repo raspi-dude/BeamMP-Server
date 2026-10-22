@@ -79,6 +79,7 @@ Environment variables:
 | `RELAY_PUBLIC_URL` | `config.json` | Overrides `publicUrl` |
 | `RELAY_ALLOWED_IPS` | `config.json` | Overrides `allowedIps`, comma separated |
 | `RELAY_TRUST_PROXY` | `config.json` | Overrides `trustProxy` (`true`/`false`); needed behind any reverse proxy |
+| `RELAY_TRUSTED_PROXIES` | `config.json` | Overrides `trustedProxies`, comma separated |
 
 ## Configuration (`relay/config.json`)
 
@@ -87,7 +88,8 @@ Environment variables:
   "http": { "host": "0.0.0.0", "port": 8099 },
   "publicUrl": "https://relay.example.com",
   "allowedIps": ["203.0.113.7", "198.51.100.0/24"],
-  "trustProxy": false,
+  "trustProxy": true,
+  "trustedProxies": ["127.0.0.1", "::1"],
   "rateLimit": {
     "perPairing": { "windowSeconds": 10, "maxMessages": 30 },
     "perIp": { "windowSeconds": 60, "maxRequests": 600 }
@@ -101,6 +103,7 @@ Environment variables:
 | `publicUrl` | The URL `/pair` prints for `RelayUrl`. Without it the reply contains a placeholder. |
 | `allowedIps` | IPs or CIDR blocks allowed to use the relay. **Empty means any IP may connect** and the relay logs a warning at startup. IPv4-mapped addresses (`::ffff:1.2.3.4`) and `::1` are normalised, so list plain IPv4. |
 | `trustProxy` | Honour `X-Forwarded-For` / `X-Real-IP`. Only enable behind a proxy you control — otherwise a client can claim any IP and walk past `allowedIps`. Only the **rightmost** `X-Forwarded-For` entry is used, i.e. the one the proxy appended, so a client-supplied header cannot spoof the address. |
+| `trustedProxies` | Which peers may send `X-Forwarded-For` at all, like nginx's `set_real_ip_from`. Empty means "any peer may", which is only safe when the relay port is unreachable except through the proxy. Non-empty **implies** `trustProxy` for those addresses, so you can leave the flag alone. Same IP/CIDR syntax as `allowedIps`, and a typo aborts startup. |
 | `rateLimit.perPairing` | Game → Discord messages per pairing code. Sliding window, so no boundary bursts. |
 | `rateLimit.perIp` | All relay requests per client IP; this is what a long-poll budget is drawn from. |
 | `dataFile` | Where pairings are persisted (hashes only). |
@@ -127,12 +130,28 @@ talk HTTPS, because the pairing code is a bearer secret.
 
 Two settings are needed, one on each side:
 
-1. `relay/config.json`: `"trustProxy": true` (or `RELAY_TRUST_PROXY=true`). The
-   startup log then prints `trust proxy headers: yes`. Without it the relay
-   only ever sees the proxy's address, `127.0.0.1`, and the lock is meaningless.
+1. `relay/config.json`: list the proxy's address in `trustedProxies` — this both
+   enables header handling and restricts it to that peer:
+
+   ```json
+   "trustProxy": true,
+   "trustedProxies": ["127.0.0.1", "::1"]
+   ```
+
+   Use the address the relay actually sees as its peer, not the proxy's public
+   IP: `127.0.0.1` when nginx runs on the same host, a Docker bridge subnet
+   (`172.17.0.0/16`) when NPM is a container and the relay on the host, or the
+   container's IP/network when both are containers. Startup prints
+   `trusted proxies: …` so you can confirm it. Without this, the relay only sees
+   the proxy's address and the lock is meaningless.
 2. The proxy must forward the peer address. nginx does this by default with
    `X-Real-IP` and `X-Forwarded-For`; Nginx Proxy Manager's built-in
    `proxy.conf` already sends both, so **no Advanced-tab config is required**.
+
+Leaving `trustedProxies` empty while `trustProxy` is on means "believe the
+header from whoever connects", and the relay logs a warning about it. A direct
+connection to port 8099 could then claim any IP, so only do that when the port
+is firewalled or bound to loopback.
 
 Nginx Proxy Manager, add a Proxy Host:
 
@@ -157,11 +176,11 @@ Details that matter here:
   server-level directives are not inherited once a location sets its own.
 - nginx's default `proxy_read_timeout` is 60 s and the relay's longest poll is
   20 s, so long-polls survive untouched. No timeout tuning needed.
-- **Never expose port 8099 publicly.** With `trustProxy: true` the header is the
-  only source of the client IP, so anything that can reach the relay directly
-  can forge it. Bind it to `127.0.0.1` (`"http": { "host": "127.0.0.1" }`) or
-  firewall the port to the proxy only. Inside Docker, keep NPM and the relay on
-  a private network for the same reason.
+- **Keep port 8099 off the internet.** With `trustedProxies` set, a direct
+  connection is ignored (its header is discarded and its socket address used),
+  so the lock holds either way — but the extra reachability is still needless
+  attack surface. Bind it to `127.0.0.1` (`"http": { "host": "127.0.0.1" }`) or
+  firewall the port to the proxy only.
 - Behind Cloudflare as well, NPM forwards Cloudflare's address rather than the
   player's. Add Cloudflare's ranges in the Advanced tab so `$remote_addr` is
   corrected first, otherwise every game server appears as one IP and the per-IP

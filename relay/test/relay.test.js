@@ -311,6 +311,35 @@ test('clientIp only honours forwarding headers when the proxy is trusted', () =>
   assert.equal(clientIp(realIp, { trustProxy: true }), '198.51.100.4');
 });
 
+test('clientIp only believes forwarding headers from a configured proxy peer', () => {
+  const forwarded = (peer, header) => ({
+    headers: { 'x-forwarded-for': header },
+    socket: { remoteAddress: peer },
+  });
+  const nginxNextDoor = new IpAllowList(['127.0.0.1']);
+
+  // The proxy we listed appended the real client: trust it.
+  assert.equal(
+    clientIp(forwarded('127.0.0.1', '203.0.113.7, 198.51.100.9'), { trustedProxies: nginxNextDoor }),
+    '198.51.100.9',
+  );
+  // Same header, but the connection did not come from the proxy: ignore it.
+  assert.equal(
+    clientIp(forwarded('198.51.100.9', '203.0.113.7'), { trustedProxies: nginxNextDoor }),
+    '198.51.100.9',
+  );
+  // A chain of two proxies we own skips past both to reach the player.
+  assert.equal(
+    clientIp(forwarded('127.0.0.1', '203.0.113.7, 10.0.0.2'), { trustedProxies: new IpAllowList(['127.0.0.1', '10.0.0.0/8']) }),
+    '203.0.113.7',
+  );
+  // Setting the list is enough; the blunt flag does not have to be on as well.
+  assert.equal(
+    clientIp(forwarded('127.0.0.1', '198.51.100.9'), { trustProxy: false, trustedProxies: nginxNextDoor }),
+    '198.51.100.9',
+  );
+});
+
 test('HTTP: a forged X-Forwarded-For cannot claim an allowlisted IP', async () => {
   const ipLock = new IpAllowList(['203.0.113.7']);
   await withServer(async ({ core, base }) => {
@@ -329,6 +358,22 @@ test('HTTP: a forged X-Forwarded-For cannot claim an allowlisted IP', async () =
     // A genuine allowlisted client works with the same header layout.
     assert.equal((await send('198.51.100.9, 203.0.113.7')).status, 200);
   }, { ipLock, trustProxy: true });
+});
+
+test('HTTP: a direct connection cannot use the forwarding header', async () => {
+  const ipLock = new IpAllowList(['203.0.113.7']);
+  // The proxy lives at 10.0.0.1, so the test client at 127.0.0.1 is not it.
+  const trustedProxies = new IpAllowList(['10.0.0.1']);
+  await withServer(async ({ core, base }) => {
+    const { code } = core.createPairing({ channelId: CHANNEL });
+    const response = await fetch(`${base}/v1/relay/send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': '203.0.113.7' },
+      body: JSON.stringify({ code, name: 'a', message: 'b' }),
+    });
+    assert.equal(response.status, 403);
+    assert.match((await response.json()).message, /Your IP \(127\.0\.0\.1\)/);
+  }, { ipLock, trustProxy: true, trustedProxies });
 });
 
 test('RateLimiter blocks over the limit and frees up after the window', () => {
@@ -354,6 +399,7 @@ test('loadConfig applies defaults, file values and env overrides', () => {
     publicUrl: 'https://relay.raspi.host',
     allowedIps: ['10.0.0.0/8'],
     trustProxy: true,
+    trustedProxies: ['127.0.0.1'],
     rateLimit: { perPairing: { windowSeconds: 5, maxMessages: 4 } },
   }));
 
@@ -362,18 +408,30 @@ test('loadConfig applies defaults, file values and env overrides', () => {
   assert.equal(fromFile.ipLock.locked, true);
   assert.equal(fromFile.ipLock.allows('10.9.9.9'), true);
   assert.equal(fromFile.trustProxy, true);
+  assert.equal(fromFile.proxyLock.locked, true);
+  assert.equal(fromFile.proxyLock.allows('127.0.0.1'), true);
+  assert.equal(fromFile.proxyLock.allows('127.0.0.2'), false);
   assert.equal(fromFile.rateLimit.perPairing.maxMessages, 4);
   // Untouched values keep their documented defaults.
   assert.equal(fromFile.rateLimit.perIp.maxRequests, 600);
   assert.equal(fromFile.port, 8099);
 
-  const fromEnv = loadConfig({ RELAY_ALLOWED_IPS: '203.0.113.7, 192.0.2.0/24', RELAY_PUBLIC_URL: 'https://x.test' }, file);
+  const fromEnv = loadConfig({ RELAY_ALLOWED_IPS: '203.0.113.7, 192.0.2.0/24', RELAY_PUBLIC_URL: 'https://x.test', RELAY_TRUSTED_PROXIES: '172.17.0.0/16' }, file);
   assert.equal(fromEnv.ipLock.allows('192.0.2.5'), true);
   assert.equal(fromEnv.ipLock.allows('10.9.9.9'), false);
   assert.equal(fromEnv.publicUrl, 'https://x.test');
+  assert.equal(fromEnv.proxyLock.allows('172.17.0.8'), true);
+  // The env list replaces the file list rather than merging with it.
+  assert.equal(fromEnv.proxyLock.allows('127.0.0.1'), false);
+
+  // Unset means "any peer may send the header", and no lock is reported.
+  assert.equal(loadConfig({}, path.join(dir, 'missing.json')).proxyLock.locked, false);
 
   writeFileSync(file, JSON.stringify({ allowedIps: ['10.0.0.0/99'] }));
   assert.throws(() => loadConfig({}, file), /prefix length/);
+
+  writeFileSync(file, JSON.stringify({ trustedProxies: ['proxy.internal'] }));
+  assert.throws(() => loadConfig({}, file), /not an IP address/);
 });
 
 test('HTTP: a client outside allowedIps gets 403 with an explanation', async () => {
