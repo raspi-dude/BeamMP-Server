@@ -159,12 +159,52 @@ Nginx Proxy Manager, add a Proxy Host:
 |---|---|
 | Domain Names | `relay.example.com` |
 | Scheme | `http` |
-| Forward Hostname/IP | `127.0.0.1` (NPM in Docker, relay on the host: use `host.docker.internal` or the Docker bridge IP) |
+| Forward Hostname/IP | `relay` when both are containers on one Docker network (see below); `127.0.0.1` when the relay runs on the host next to NPM, or `host.docker.internal` if NPM is containerised and the relay is not |
 | Forward Port | `8099` |
 | Block Common Exploits | on |
 | Websockets Support | not needed (long-polling is plain HTTP) |
 
 Then the SSL tab: request a Let's Encrypt certificate and turn on **Force SSL**.
+
+#### Both containers in Docker
+
+On a shared user-defined network the relay sees the NPM **container** as its
+peer, never `127.0.0.1`, and container addresses are handed out again whenever a
+container is recreated. Pin the subnet and trust the whole subnet rather than a
+single address:
+
+```yaml
+networks:
+  relay-net:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+services:
+  npm:
+    networks: [relay-net]
+  relay:
+    networks: [relay-net]
+```
+
+In `relay/config.json`:
+
+```json
+"trustedProxies": ["172.28.0.0/24"]
+```
+
+In the proxy host, forward to `relay:8099` — the service name resolves on the
+shared network — and do **not** publish 8099 to the host at all. If you would
+rather trust one address, give NPM `ipv4_address: 172.28.0.10` under the same
+network and list only `172.28.0.10`.
+
+The default bridge (`172.17.0.0/16`, e.g. plain `docker run` without `--network`)
+has no name resolution and reassigns addresses freely, so avoid relying on it.
+Forwarding to `host.docker.internal` instead works, but then the peer address
+depends on Docker's NAT and is a poor thing to pin a security decision to.
+
+`allowedIps` is unaffected: it still lists the **game servers'** public egress
+IPs, not anything Docker-side.
 
 Details that matter here:
 
