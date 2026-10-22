@@ -483,3 +483,4 @@ nohup.out
 relay/node_modules/
 relay/data/
 relay/src/token.txt
+*.zip
