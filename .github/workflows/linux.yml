@@ -65,7 +65,7 @@ jobs:
       - name: Archive server artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BeamMP-Server.${{ matrix.distro }}.${{ matrix.version }}.x86_64
+          name: BeamMP-Server-RaspiHost.${{ matrix.distro }}.${{ matrix.version }}.x86_64
           path: ./bin/BeamMP-Server
 
       - name: Archive server debug info artifact
@@ -133,7 +133,7 @@ jobs:
       - name: Archive server artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BeamMP-Server.${{ matrix.distro }}.${{ matrix.version }}.arm64
+          name: BeamMP-Server-RaspiHost.${{ matrix.distro }}.${{ matrix.version }}.arm64
           path: ./bin/BeamMP-Server
 
       - name: Archive server debug info artifact
