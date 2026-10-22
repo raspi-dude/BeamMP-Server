@@ -244,6 +244,15 @@ namespace Moderation {
 
     struct TLoadResult;
 
+    /// One RASPI_* environment variable that replaced a value from
+    /// RaspiConfig.toml. Empty variables are ignored, so the file stays in
+    /// charge of everything the panel does not set.
+    struct TEnvOverride {
+        std::string Section; ///< TOML table, e.g. "Moderation.ChatFilter"
+        std::string Key; ///< key inside that table
+        std::string EnvName; ///< variable the value came from
+    };
+
     /// Settings of RaspiConfig.toml.
     struct TRaspiConfig {
         struct TOperator {
@@ -312,6 +321,9 @@ namespace Moderation {
         /// Like Load, but never creates the file and reports whether the
         /// existing one could be read. `reload` uses it so a typo cannot
         /// replace the running config with defaults.
+        ///
+        /// RASPI_* environment variables are applied on top of the file here,
+        /// so every caller (startup, `reload`, tests) sees the same values.
         static TLoadResult TryLoad(const std::filesystem::path& Path);
 
         /// Writes this config out, overwriting the file.
@@ -325,7 +337,20 @@ namespace Moderation {
         TRaspiConfig Config;
         bool Ok { false };
         std::string Error;
+        /// Variables that overrode the file, in the order they were applied.
+        std::vector<TEnvOverride> EnvOverrides;
     };
+
+    /// The TOML text for one key of Config, e.g. `true`, `20` or `"10m"`.
+    /// Empty when the key is not one the environment may set.
+    std::optional<std::string> RenderedValue(const TRaspiConfig& Config, const std::string& Section, const std::string& Key);
+
+    /// Writes the overridden keys back into the file, leaving every other byte
+    /// alone: comments, ordering, line endings and unrelated values survive.
+    /// Only lines whose value actually differs are rewritten. Returns how many
+    /// lines changed, so 0 means the file already agreed with the server.
+    std::size_t WriteEnvOverrides(const std::filesystem::path& Path, const TRaspiConfig& Config,
+        const std::vector<TEnvOverride>& Overrides);
 
     /// One difference between two configurations, as reported by `reload`.
     struct TConfigChange {

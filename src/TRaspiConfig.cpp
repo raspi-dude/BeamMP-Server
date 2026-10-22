@@ -21,8 +21,11 @@
 #include "Common.h"
 #include "TConfig.h" // brings in toml11 the same way the server config does
 
+#include <charconv>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <system_error>
 
 namespace Moderation {
 
@@ -97,21 +100,144 @@ namespace {
         return Out;
     }
 
+    /// Every key a RASPI_* variable may set. Only scalars are listed on
+    /// purpose: lists and the operator table cannot be expressed as one value
+    /// and stay owned by the file.
+    enum class EEnvKind {
+        Bool,
+        Int,
+        String
+    };
+
+    struct TEnvSpec {
+        std::string_view Section;
+        std::string_view Key;
+        std::string_view Env;
+        EEnvKind Kind;
+    };
+
+    constexpr TEnvSpec EnvSpecs[] = {
+        { "Moderation", "Enabled", "RASPI_MOD_ENABLED", EEnvKind::Bool },
+        { "Moderation", "CommandPrefix", "RASPI_MOD_COMMAND_PREFIX", EEnvKind::String },
+        { "Moderation", "DefaultMuteDuration", "RASPI_MOD_MUTE_DURATION", EEnvKind::String },
+        { "Moderation.ChatFilter", "Enabled", "RASPI_MOD_CHATFILTER_ENABLED", EEnvKind::Bool },
+        { "Moderation.Afk", "Enabled", "RASPI_MOD_AFK_ENABLED", EEnvKind::Bool },
+        { "Discord", "Enabled", "RASPI_DISCORD_ENABLED", EEnvKind::Bool },
+        { "Discord", "RelayUrl", "RASPI_DISCORD_RELAY_URL", EEnvKind::String },
+        { "Discord", "PairingCode", "RASPI_DISCORD_PAIRING_CODE", EEnvKind::String },
+        { "Discord", "RelayServerChat", "RASPI_DISCORD_RELAY_SERVER_CHAT", EEnvKind::Bool },
+        { "Discord", "RelayDiscordChat", "RASPI_DISCORD_RELAY_DISCORD_CHAT", EEnvKind::Bool },
+        { "Discord", "RelayEvents", "RASPI_DISCORD_RELAY_EVENTS", EEnvKind::Bool },
+        { "Discord", "PollWaitSeconds", "RASPI_DISCORD_POLL_WAIT_SECONDS", EEnvKind::Int },
+        { "Discord", "MaxQueue", "RASPI_DISCORD_MAX_QUEUE", EEnvKind::Int },
+    };
+
+    std::optional<bool> ParseEnvBool(const std::string& Text) {
+        const std::string Lower = ToLower(Trim(Text));
+        if (Lower == "1" || Lower == "true" || Lower == "yes" || Lower == "on") {
+            return true;
+        }
+        if (Lower == "0" || Lower == "false" || Lower == "no" || Lower == "off") {
+            return false;
+        }
+        return std::nullopt;
+    }
+
+    std::optional<std::int64_t> ParseEnvInt(const std::string& Text) {
+        const auto Trimmed = Trim(Text);
+        if (Trimmed.empty()) {
+            return std::nullopt;
+        }
+        std::int64_t Value = 0;
+        const auto [End, Error] = std::from_chars(Trimmed.data(), Trimmed.data() + Trimmed.size(), Value);
+        if (Error != std::errc {} || End != Trimmed.data() + Trimmed.size()) {
+            return std::nullopt;
+        }
+        return Value;
+    }
+
+    /// "Moderation.ChatFilter" -> { "Moderation", "ChatFilter" }
+    std::vector<std::string_view> SplitSection(std::string_view Section) {
+        std::vector<std::string_view> Parts;
+        while (true) {
+            const auto Dot = Section.find('.');
+            if (Dot == std::string_view::npos) {
+                Parts.push_back(Section);
+                return Parts;
+            }
+            Parts.push_back(Section.substr(0, Dot));
+            Section.remove_prefix(Dot + 1);
+        }
+    }
+
+    void SetTableValue(toml::value& Data, std::string_view Section, std::string_view Key, toml::value Value) {
+        toml::value* Table = &Data;
+        for (const auto Part : SplitSection(Section)) {
+            Table = &(*Table)[std::string(Part)];
+        }
+        (*Table)[std::string(Key)] = std::move(Value);
+    }
+
+    /// Puts the environment values into the parsed table, so the existing
+    /// reading, clamping and validation below apply to them exactly as they do
+    /// to values from the file. An empty variable means "use the file".
+    void ApplyEnvOverrides(toml::value& Data, std::vector<TEnvOverride>& Applied) {
+        for (const auto& Spec : EnvSpecs) {
+            const std::string EnvName(Spec.Env);
+            const char* Raw = std::getenv(EnvName.c_str());
+            if (Raw == nullptr || *Raw == '\0') {
+                continue;
+            }
+            const std::string Text(Raw);
+
+            switch (Spec.Kind) {
+            case EEnvKind::Bool: {
+                const auto Parsed = ParseEnvBool(Text);
+                if (!Parsed) {
+                    beammp_warnf("RaspiConfig: {} must be true or false, ignoring it", EnvName);
+                    continue;
+                }
+                SetTableValue(Data, Spec.Section, Spec.Key, toml::value(*Parsed));
+                break;
+            }
+            case EEnvKind::Int: {
+                const auto Parsed = ParseEnvInt(Text);
+                if (!Parsed) {
+                    beammp_warnf("RaspiConfig: {} must be a whole number, ignoring it", EnvName);
+                    continue;
+                }
+                SetTableValue(Data, Spec.Section, Spec.Key, toml::value(static_cast<std::int64_t>(*Parsed)));
+                break;
+            }
+            case EEnvKind::String:
+                SetTableValue(Data, Spec.Section, Spec.Key, toml::value(Text));
+                break;
+            }
+
+            beammp_infof("RaspiConfig: {}.{} comes from {} (Startup tab)", Spec.Section, Spec.Key, EnvName);
+            Applied.push_back({ std::string(Spec.Section), std::string(Spec.Key), EnvName });
+        }
+    }
+
 } // namespace
 
 TRaspiConfig TRaspiConfig::Load(const std::filesystem::path& Path) {
     if (!std::filesystem::exists(Path)) {
-        TRaspiConfig Config;
         beammp_info("No moderation config found, generating '" + Path.string() + "'");
-        Config.FlushToFile(Path);
-        return Config;
+        TRaspiConfig { }.FlushToFile(Path);
     }
 
     auto Result = TryLoad(Path);
     if (!Result.Ok) {
         beammp_error("RaspiConfig: failed to parse '" + Path.string() + "': " + Result.Error);
         beammp_error("RaspiConfig: continuing with built-in moderation defaults");
+        return Result.Config;
     }
+
+    // The environment wins over the file, and the file is then brought in line
+    // with what the server is actually running, so nobody has to guess which of
+    // the two is in charge.
+    WriteEnvOverrides(Path, Result.Config, Result.EnvOverrides);
     return Result.Config;
 }
 
@@ -125,7 +251,8 @@ TLoadResult TRaspiConfig::TryLoad(const std::filesystem::path& Path) {
     }
 
     try {
-        const toml::value Data = toml::parse(Path.string());
+        toml::value Data = toml::parse(Path.string());
+        ApplyEnvOverrides(Data, Result.EnvOverrides);
 
         // [Discord] is a top-level table, independent of [Moderation].
         if (const auto* Discord = FindValue(Data, "Discord"); Discord != nullptr && Discord->is_table()) {
@@ -278,6 +405,11 @@ void TRaspiConfig::FlushToFile(const std::filesystem::path& Path) const {
            "#\n"
            "# Durations accept \"30s\", \"10m\", \"2h\", \"7d\", \"1w\", a bare number\n"
            "# (minutes) or \"permanent\".\n"
+           "#\n"
+           "# The RASPI_MOD_* and RASPI_DISCORD_* environment variables (the panel's\n"
+           "# Startup tab) win over this file; their values are written back here on\n"
+           "# start. Leave a variable blank to keep configuring that setting in this\n"
+           "# file instead.\n"
            "\n"
            "[Moderation]\n"
            "Enabled = "
@@ -396,6 +528,214 @@ void TRaspiConfig::FlushToFile(const std::filesystem::path& Path) const {
     if (!File.good()) {
         beammp_error("RaspiConfig: failed while writing '" + Path.string() + "'");
     }
+}
+
+std::optional<std::string> RenderedValue(const TRaspiConfig& Config, const std::string& Section, const std::string& Key) {
+    const auto Bool = [](bool Value) { return std::string(Value ? "true" : "false"); };
+
+    if (Section == "Moderation") {
+        if (Key == "Enabled") {
+            return Bool(Config.Enabled);
+        }
+        if (Key == "CommandPrefix") {
+            return Quote(Config.CommandPrefix);
+        }
+        if (Key == "DefaultMuteDuration") {
+            return Quote(Config.DefaultMuteDuration);
+        }
+    } else if (Section == "Moderation.ChatFilter") {
+        if (Key == "Enabled") {
+            return Bool(Config.ChatFilter.Enabled);
+        }
+    } else if (Section == "Moderation.Afk") {
+        if (Key == "Enabled") {
+            return Bool(Config.Afk.Enabled);
+        }
+    } else if (Section == "Discord") {
+        if (Key == "Enabled") {
+            return Bool(Config.Discord.Enabled);
+        }
+        if (Key == "RelayUrl") {
+            return Quote(Config.Discord.RelayUrl);
+        }
+        if (Key == "PairingCode") {
+            return Quote(Config.Discord.PairingCode);
+        }
+        if (Key == "RelayServerChat") {
+            return Bool(Config.Discord.RelayServerChat);
+        }
+        if (Key == "RelayDiscordChat") {
+            return Bool(Config.Discord.RelayDiscordChat);
+        }
+        if (Key == "RelayEvents") {
+            return Bool(Config.Discord.RelayEvents);
+        }
+        if (Key == "PollWaitSeconds") {
+            return std::to_string(Config.Discord.PollWaitSeconds);
+        }
+        if (Key == "MaxQueue") {
+            return std::to_string(Config.Discord.MaxQueue);
+        }
+    }
+    return std::nullopt;
+}
+
+std::size_t WriteEnvOverrides(const std::filesystem::path& Path, const TRaspiConfig& Config,
+    const std::vector<TEnvOverride>& Overrides) {
+    if (Overrides.empty()) {
+        return 0;
+    }
+
+    std::ifstream In(Path, std::ios::binary);
+    if (!In) {
+        beammp_warn("RaspiConfig: cannot read '" + Path.string() + "' to store the environment overrides");
+        return 0;
+    }
+    std::stringstream Buffer;
+    Buffer << In.rdbuf();
+    const std::string Text = Buffer.str();
+    In.close();
+
+    // Split first, so line endings can be put back exactly as they were.
+    struct TLine {
+        std::string Body;
+        std::string Ending;
+    };
+    std::vector<TLine> Lines;
+    {
+        std::size_t Pos = 0;
+        while (Pos < Text.size()) {
+            auto Next = Text.find('\n', Pos);
+            const bool HasNewline = Next != std::string::npos;
+            if (!HasNewline) {
+                Next = Text.size();
+            }
+            std::string Body = Text.substr(Pos, Next - Pos);
+            std::string Ending = HasNewline ? "\n" : "";
+            if (!Body.empty() && Body.back() == '\r') {
+                Body.pop_back();
+                Ending = "\r\n";
+            }
+            Lines.push_back({ std::move(Body), std::move(Ending) });
+            Pos = HasNewline ? Next + 1 : Text.size();
+        }
+    }
+
+    std::vector<bool> Done(Overrides.size(), false);
+    std::string CurrentSection;
+    std::size_t Changed = 0;
+
+    for (auto& Line : Lines) {
+        const auto Trimmed = Trim(Line.Body);
+        if (Trimmed.empty()) {
+            continue;
+        }
+        if (Trimmed.front() == '[' && Trimmed.back() == ']') {
+            // [[Moderation.Operators]] and [Discord] both name the table they open.
+            const auto Open = Trimmed.find_first_not_of('[');
+            const auto Close = Trimmed.find(']', Open);
+            if (Open != std::string_view::npos && Close != std::string_view::npos) {
+                CurrentSection = std::string(Trim(Trimmed.substr(Open, Close - Open)));
+            }
+            continue;
+        }
+
+        const auto Separator = Line.Body.find('=');
+        if (Separator == std::string::npos) {
+            continue;
+        }
+        const auto Key = Trim(std::string_view(Line.Body).substr(0, Separator));
+
+        for (std::size_t i = 0; i < Overrides.size(); ++i) {
+            const auto& Override = Overrides[i];
+            if (Done[i] || Override.Section != CurrentSection || Key != std::string_view(Override.Key)) {
+                continue;
+            }
+            Done[i] = true;
+
+            const auto Rendered = RenderedValue(Config, Override.Section, Override.Key);
+            if (!Rendered) {
+                break;
+            }
+
+            std::size_t ValueStart = Separator + 1;
+            while (ValueStart < Line.Body.size()
+                && (Line.Body[ValueStart] == ' ' || Line.Body[ValueStart] == '\t')) {
+                ++ValueStart;
+            }
+            // The value ends at an unquoted '#'; the comment after it is kept.
+            std::size_t ValueEnd = ValueStart;
+            bool InQuotes = false;
+            for (; ValueEnd < Line.Body.size(); ++ValueEnd) {
+                const char C = Line.Body[ValueEnd];
+                if (InQuotes && C == '\\') {
+                    ++ValueEnd;
+                    continue;
+                }
+                if (C == '"') {
+                    InQuotes = !InQuotes;
+                    continue;
+                }
+                if (C == '#' && !InQuotes) {
+                    break;
+                }
+            }
+            std::size_t TrimEnd = ValueEnd;
+            while (TrimEnd > ValueStart && (Line.Body[TrimEnd - 1] == ' ' || Line.Body[TrimEnd - 1] == '\t')) {
+                --TrimEnd;
+            }
+
+            const std::string Existing = Line.Body.substr(ValueStart, TrimEnd - ValueStart);
+            if (Existing == *Rendered) {
+                break;
+            }
+            Line.Body = Line.Body.substr(0, ValueStart) + *Rendered + Line.Body.substr(TrimEnd);
+            ++Changed;
+            break;
+        }
+    }
+
+    if (Changed == 0) {
+        return 0;
+    }
+
+    std::string NewText;
+    NewText.reserve(Text.size() + 32);
+    for (const auto& Line : Lines) {
+        NewText += Line.Body;
+        NewText += Line.Ending;
+    }
+
+    // Written next to the file and then renamed over it, so a crash halfway
+    // through cannot leave a half-written config behind.
+    const auto TempPath = std::filesystem::path(Path.string() + ".tmp");
+    {
+        std::ofstream Out(TempPath, std::ios::binary | std::ios::trunc);
+        if (!Out) {
+            beammp_error("RaspiConfig: could not open a temporary file next to '" + Path.string() + "'");
+            return 0;
+        }
+        Out.write(NewText.data(), static_cast<std::streamsize>(NewText.size()));
+        if (!Out.good()) {
+            beammp_error("RaspiConfig: failed while writing '" + TempPath.string() + "'");
+            Out.close();
+            std::error_code Ignored;
+            std::filesystem::remove(TempPath, Ignored);
+            return 0;
+        }
+    }
+
+    std::error_code Error;
+    std::filesystem::rename(TempPath, Path, Error);
+    if (Error) {
+        beammp_error("RaspiConfig: could not replace '" + Path.string() + "': " + Error.message());
+        std::error_code Ignored;
+        std::filesystem::remove(TempPath, Ignored);
+        return 0;
+    }
+
+    beammp_infof("RaspiConfig: wrote {} environment override(s) into '{}'", Changed, Path.string());
+    return Changed;
 }
 
 } // namespace Moderation
@@ -707,4 +1047,160 @@ TEST_CASE("Moderation::DiffConfigs") {
         REQUIRE(Changes.size() == 1u);
         CHECK(Changes[0].Text == "Discord.RelayUrl: https://relay.example -> (empty)");
     }
+}
+
+namespace {
+
+    /// Sets one variable for the duration of a test and removes it afterwards.
+    struct TEnvScope {
+        explicit TEnvScope(const std::string& InName, const char* InValue)
+            : Name(InName) {
+            Set(InValue);
+        }
+        TEnvScope(const TEnvScope&) = delete;
+        TEnvScope& operator=(const TEnvScope&) = delete;
+        ~TEnvScope() { Set(nullptr); }
+
+        void Set(const char* Value) const {
+#ifdef _WIN32
+            _putenv_s(Name.c_str(), Value == nullptr ? "" : Value);
+#else
+            if (Value == nullptr) {
+                unsetenv(Name.c_str());
+            } else {
+                setenv(Name.c_str(), Value, 1);
+            }
+#endif
+        }
+
+        std::string Name;
+    };
+
+    std::string ReadAll(const std::filesystem::path& Path) {
+        std::ifstream In(Path, std::ios::binary);
+        std::stringstream Buffer;
+        Buffer << In.rdbuf();
+        return Buffer.str();
+    }
+
+} // namespace
+
+TEST_CASE("Moderation::TRaspiConfig applies RASPI_ environment overrides") {
+    using namespace Moderation;
+    namespace fs = std::filesystem;
+
+    const auto Path = fs::temp_directory_path() / "rh-env-overrides-test.toml";
+    {
+        std::ofstream Out(Path);
+        REQUIRE(Out.good());
+        Out << "[Moderation]\n"
+               "Enabled = false\n"
+               "\n[Moderation.ChatFilter]\n"
+               "Enabled = true\n"
+               "\n[Discord]\n"
+               "Enabled = false\n"
+               "PairingCode = \"from-file\"\n"
+               "PollWaitSeconds = 20\n";
+    }
+
+    const TEnvScope ModEnabled("RASPI_MOD_ENABLED", "true");
+    const TEnvScope PairingCode("RASPI_DISCORD_PAIRING_CODE", "panel-code");
+    // Out of range on purpose: the clamp from the file path has to apply here too.
+    const TEnvScope PollWait("RASPI_DISCORD_POLL_WAIT_SECONDS", "99");
+    // Blank means "use the file", and garbage is ignored with a warning.
+    const TEnvScope BlankRelay("RASPI_DISCORD_RELAY_URL", "");
+    const TEnvScope GarbageAfk("RASPI_MOD_AFK_ENABLED", "maybe");
+
+    const auto Loaded = TRaspiConfig::TryLoad(Path);
+    REQUIRE(Loaded.Ok);
+
+    CHECK(Loaded.Config.Enabled);
+    CHECK(Loaded.Config.Discord.PairingCode == "panel-code");
+    CHECK(Loaded.Config.Discord.PollWaitSeconds == 20);
+    CHECK(Loaded.Config.Discord.RelayUrl.empty());
+    // Untouched settings stay file-owned.
+    CHECK_FALSE(Loaded.Config.Discord.Enabled);
+    CHECK(Loaded.Config.ChatFilter.Enabled);
+    CHECK_FALSE(Loaded.Config.Afk.Enabled);
+
+    // Only the three usable variables count as overrides.
+    REQUIRE(Loaded.EnvOverrides.size() == 3u);
+    CHECK(Loaded.EnvOverrides[0].EnvName == "RASPI_MOD_ENABLED");
+    CHECK(Loaded.EnvOverrides[1].EnvName == "RASPI_DISCORD_PAIRING_CODE");
+    CHECK(Loaded.EnvOverrides[2].EnvName == "RASPI_DISCORD_POLL_WAIT_SECONDS");
+
+    // Load() is what the server uses, and it also stores the values in the
+    // file so the file never shows something the server is not running.
+    const auto Config = TRaspiConfig::Load(Path);
+    CHECK(Config.Discord.PairingCode == "panel-code");
+    // CRLF on Windows, LF elsewhere; the check should not care which.
+    std::string Text = ReadAll(Path);
+    Text.erase(std::remove(Text.begin(), Text.end(), '\r'), Text.end());
+    CHECK(Text.find("PairingCode = \"panel-code\"") != std::string::npos);
+    CHECK(Text.find("PairingCode = \"from-file\"") == std::string::npos);
+    CHECK(Text.find("[Moderation]\nEnabled = true\n") != std::string::npos);
+    // The blank and the unusable variables were not written.
+    CHECK(Text.find("RelayUrl") == std::string::npos);
+
+    fs::remove(Path);
+}
+
+TEST_CASE("Moderation::WriteEnvOverrides rewrites only the overridden lines") {
+    using namespace Moderation;
+    namespace fs = std::filesystem;
+
+    const auto Path = fs::temp_directory_path() / "rh-env-writeback-test.toml";
+    {
+        std::ofstream Out(Path, std::ios::binary);
+        REQUIRE(Out.good());
+        Out << "# top comment\r\n"
+               "[Moderation]\r\n"
+               "Enabled = false  # keep me\r\n"
+               "CommandPrefix = \"!\"\r\n"
+               "\r\n"
+               "[Moderation.ChatFilter]\r\n"
+               "Enabled = true\r\n"
+               "Words = [\"one\"]\r\n"
+               "\r\n"
+               "[Discord]\r\n"
+               "Enabled = false\r\n"
+               "PairingCode = \"old\"\r\n"
+               "PollWaitSeconds = 20\r\n";
+    }
+
+    TRaspiConfig Config;
+    Config.Enabled = true;
+    Config.ChatFilter.Enabled = true; // same as the file: must not be rewritten
+    Config.Discord.Enabled = false; // same as the file too
+    Config.Discord.PairingCode = "new";
+
+    const std::vector<TEnvOverride> Overrides {
+        { "Moderation", "Enabled", "RASPI_MOD_ENABLED" },
+        { "Moderation.ChatFilter", "Enabled", "RASPI_MOD_CHATFILTER_ENABLED" },
+        { "Discord", "Enabled", "RASPI_DISCORD_ENABLED" },
+        { "Discord", "PairingCode", "RASPI_DISCORD_PAIRING_CODE" },
+    };
+
+    CHECK(WriteEnvOverrides(Path, Config, Overrides) == 2u);
+
+    const auto Text = ReadAll(Path);
+    // The inline comment survives, and so does the indentation before it.
+    CHECK(Text.find("Enabled = true  # keep me\r\n") != std::string::npos);
+    CHECK(Text.find("PairingCode = \"new\"\r\n") != std::string::npos);
+    // The same key in another table was not touched, despite `Enabled` matching.
+    CHECK(Text.find("[Moderation.ChatFilter]\r\nEnabled = true\r\n") != std::string::npos);
+    CHECK(Text.find("Words = [\"one\"]\r\n") != std::string::npos);
+    // Nothing else changed: no bare LF sneaked in, header and blank lines intact.
+    CHECK(Text.find("# top comment\r\n") != std::string::npos);
+    for (std::size_t i = 0; i < Text.size(); ++i) {
+        if (Text[i] == '\n') {
+            REQUIRE(i > 0);
+            CHECK(Text[i - 1] == '\r');
+        }
+    }
+
+    // Running again changes nothing, so a restart never rewrites the file twice.
+    CHECK(WriteEnvOverrides(Path, Config, Overrides) == 0u);
+
+    fs::remove(Path);
 }

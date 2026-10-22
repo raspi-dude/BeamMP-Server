@@ -171,6 +171,11 @@ TModeration::TReloadReport TModeration::Reload() {
     }
 
     Moderation::TRaspiConfig New = Loaded.Config;
+
+    // TryLoad already applied the RASPI_* variables; write them back so a
+    // reload cannot leave the file disagreeing with the running server (or
+    // quietly revert a value the panel set).
+    Moderation::WriteEnvOverrides(mConfigPath, New, Loaded.EnvOverrides);
     Report.Changes = Moderation::DiffConfigs(Old, New);
 
     // The bridge builds its threads, queue and relay session in main(), so
