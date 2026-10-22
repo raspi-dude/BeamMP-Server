@@ -85,15 +85,28 @@ export class IpAllowList {
  * X-Forwarded-For / X-Real-IP are only honoured when `trustProxy` is on: a
  * proxy in front of the relay means every request arrives from 127.0.0.1, but
  * trusting the header without a proxy lets any client spoof an allowed IP.
+ *
+ * The LAST entry is used, not the first. Nginx (and so Nginx Proxy Manager)
+ * appends the peer address with `$proxy_add_x_forwarded_for`, which keeps
+ * whatever the client sent to its left:
+ *
+ *   client sends:  X-Forwarded-For: 203.0.113.7      (an allowlisted IP)
+ *   proxy sends:   X-Forwarded-For: 203.0.113.7, 198.51.100.9
+ *
+ * The rightmost entry is the address our proxy actually saw. Reading the first
+ * one would let anyone walk past `allowedIps` by forging a header, and would
+ * let one caller reset another's rate limit.
  */
 export function clientIp(req, { trustProxy = false } = {}) {
   if (trustProxy) {
     const forwarded = req.headers['x-forwarded-for'];
-    const rawForwarded = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-    const first = String(rawForwarded ?? '').split(',')[0].trim();
-    const candidate = normalizeIp(first);
-    if (candidate && net.isIP(candidate)) {
-      return candidate;
+    const rawForwarded = Array.isArray(forwarded) ? forwarded.join(',') : forwarded;
+    const entries = String(rawForwarded ?? '').split(',').reverse();
+    for (const entry of entries) {
+      const candidate = normalizeIp(entry.trim());
+      if (candidate && net.isIP(candidate)) {
+        return candidate;
+      }
     }
     const realIp = normalizeIp(req.headers['x-real-ip']);
     if (realIp && net.isIP(realIp)) {

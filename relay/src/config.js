@@ -16,7 +16,9 @@ export const DEFAULT_CONFIG = {
   // Add the Raspi Host egress addresses (IPs or CIDR) to actually lock it.
   allowedIps: [],
   // Set to true only when a reverse proxy you control forwards X-Forwarded-For.
-  // Otherwise a client could just claim any IP and bypass the lock.
+  // Otherwise a client could just claim any IP and bypass the lock. Only the
+  // rightmost entry (the one the proxy appended) is used, so a client-sent
+  // header cannot pass `allowedIps`.
   trustProxy: false,
   rateLimit: {
     // Per pairing code: game chat. 30 lines per 10s is far above real chat.

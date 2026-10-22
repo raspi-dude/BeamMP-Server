@@ -304,10 +304,31 @@ test('clientIp only honours forwarding headers when the proxy is trusted', () =>
     socket: { remoteAddress: '::ffff:127.0.0.1' },
   };
   assert.equal(clientIp(req, { trustProxy: false }), '127.0.0.1');
-  assert.equal(clientIp(req, { trustProxy: true }), '203.0.113.9');
+  // Rightmost: the address the nearest proxy appended, not what the client wrote.
+  assert.equal(clientIp(req, { trustProxy: true }), '10.0.0.1');
 
   const realIp = { headers: { 'x-real-ip': '198.51.100.4' }, socket: { remoteAddress: '127.0.0.1' } };
   assert.equal(clientIp(realIp, { trustProxy: true }), '198.51.100.4');
+});
+
+test('HTTP: a forged X-Forwarded-For cannot claim an allowlisted IP', async () => {
+  const ipLock = new IpAllowList(['203.0.113.7']);
+  await withServer(async ({ core, base }) => {
+    const { code } = core.createPairing({ channelId: CHANNEL });
+    const send = (forwardedFor) => fetch(`${base}/v1/relay/send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': forwardedFor },
+      body: JSON.stringify({ code, name: 'a', message: 'b' }),
+    });
+
+    // nginx appends the real peer, so the client's claim stays on the left.
+    const spoofed = await send('203.0.113.7, 198.51.100.9');
+    assert.equal(spoofed.status, 403);
+    assert.match((await spoofed.json()).message, /198\.51\.100\.9/);
+
+    // A genuine allowlisted client works with the same header layout.
+    assert.equal((await send('198.51.100.9, 203.0.113.7')).status, 200);
+  }, { ipLock, trustProxy: true });
 });
 
 test('RateLimiter blocks over the limit and frees up after the window', () => {

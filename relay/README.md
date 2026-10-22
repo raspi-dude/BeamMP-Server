@@ -78,7 +78,7 @@ Environment variables:
 | `DISCORD_GUILD_ID` | unset | Register slash commands in one guild (instant, for testing) |
 | `RELAY_PUBLIC_URL` | `config.json` | Overrides `publicUrl` |
 | `RELAY_ALLOWED_IPS` | `config.json` | Overrides `allowedIps`, comma separated |
-| `RELAY_TRUST_PROXY` | `config.json` | Overrides `trustProxy` (`true`/`false`) |
+| `RELAY_TRUST_PROXY` | `config.json` | Overrides `trustProxy` (`true`/`false`); needed behind any reverse proxy |
 
 ## Configuration (`relay/config.json`)
 
@@ -100,7 +100,7 @@ Environment variables:
 |---|---|
 | `publicUrl` | The URL `/pair` prints for `RelayUrl`. Without it the reply contains a placeholder. |
 | `allowedIps` | IPs or CIDR blocks allowed to use the relay. **Empty means any IP may connect** and the relay logs a warning at startup. IPv4-mapped addresses (`::ffff:1.2.3.4`) and `::1` are normalised, so list plain IPv4. |
-| `trustProxy` | Honour `X-Forwarded-For` / `X-Real-IP`. Only enable behind a proxy you control — otherwise a client can claim any IP and walk past `allowedIps`. |
+| `trustProxy` | Honour `X-Forwarded-For` / `X-Real-IP`. Only enable behind a proxy you control — otherwise a client can claim any IP and walk past `allowedIps`. Only the **rightmost** `X-Forwarded-For` entry is used, i.e. the one the proxy appended, so a client-supplied header cannot spoof the address. |
 | `rateLimit.perPairing` | Game → Discord messages per pairing code. Sliding window, so no boundary bursts. |
 | `rateLimit.perIp` | All relay requests per client IP; this is what a long-poll budget is drawn from. |
 | `dataFile` | Where pairings are persisted (hashes only). |
@@ -122,6 +122,72 @@ game server prints the same thing in its console (`discord` command shows it as
 
 Put a TLS reverse proxy (Caddy, nginx, Traefik) in front: game servers should
 talk HTTPS, because the pairing code is a bearer secret.
+
+### Reverse proxy (nginx, incl. Nginx Proxy Manager)
+
+Two settings are needed, one on each side:
+
+1. `relay/config.json`: `"trustProxy": true` (or `RELAY_TRUST_PROXY=true`). The
+   startup log then prints `trust proxy headers: yes`. Without it the relay
+   only ever sees the proxy's address, `127.0.0.1`, and the lock is meaningless.
+2. The proxy must forward the peer address. nginx does this by default with
+   `X-Real-IP` and `X-Forwarded-For`; Nginx Proxy Manager's built-in
+   `proxy.conf` already sends both, so **no Advanced-tab config is required**.
+
+Nginx Proxy Manager, add a Proxy Host:
+
+| Field | Value |
+|---|---|
+| Domain Names | `relay.example.com` |
+| Scheme | `http` |
+| Forward Hostname/IP | `127.0.0.1` (NPM in Docker, relay on the host: use `host.docker.internal` or the Docker bridge IP) |
+| Forward Port | `8099` |
+| Block Common Exploits | on |
+| Websockets Support | not needed (long-polling is plain HTTP) |
+
+Then the SSL tab: request a Let's Encrypt certificate and turn on **Force SSL**.
+
+Details that matter here:
+
+- NPM appends with `$proxy_add_x_forwarded_for`, so a client-supplied
+  `X-Forwarded-For` stays on the **left**. The relay reads the rightmost entry,
+  which is why a forged header cannot claim an allowlisted IP. Setting
+  `proxy_set_header X-Forwarded-For $remote_addr` in the Advanced tab does not
+  work in NPM: the template's own headers live in the `location /` block, and
+  server-level directives are not inherited once a location sets its own.
+- nginx's default `proxy_read_timeout` is 60 s and the relay's longest poll is
+  20 s, so long-polls survive untouched. No timeout tuning needed.
+- **Never expose port 8099 publicly.** With `trustProxy: true` the header is the
+  only source of the client IP, so anything that can reach the relay directly
+  can forge it. Bind it to `127.0.0.1` (`"http": { "host": "127.0.0.1" }`) or
+  firewall the port to the proxy only. Inside Docker, keep NPM and the relay on
+  a private network for the same reason.
+- Behind Cloudflare as well, NPM forwards Cloudflare's address rather than the
+  player's. Add Cloudflare's ranges in the Advanced tab so `$remote_addr` is
+  corrected first, otherwise every game server appears as one IP and the per-IP
+  limit is shared by all of them:
+
+  ```nginx
+  set_real_ip_from 173.245.48.0/20;
+  set_real_ip_from 103.21.244.0/22;
+  # ...remaining ranges from https://www.cloudflare.com/ips/
+  real_ip_header CF-Connecting-IP;
+  ```
+
+- Do not use NPM's Access Lists for the game-server lock: they answer with an
+  HTML 403 before the relay is reached, so the server log cannot say why. The
+  relay's own `allowedIps` returns `ip_not_allowed` with the IP it saw.
+
+Verify from a machine that is *not* allowlisted — the 403 body echoes the
+address the relay resolved, which should be that machine's public IP and not
+`127.0.0.1`:
+
+```bash
+curl -s https://relay.example.com/v1/relay/send \
+  -H 'content-type: application/json' \
+  -d '{"code":"NOPE","name":"x","message":"y"}'
+# {"ok":false,"error":"ip_not_allowed","message":"... Your IP (198.51.100.9) ..."}
+```
 
 ## Pairing
 
