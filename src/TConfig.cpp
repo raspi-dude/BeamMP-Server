@@ -95,6 +95,16 @@ TEST_CASE("TConfig::TConfig") {
     fs::remove(CfgFile);
 }
 
+TEST_CASE("TConfig::MissingAuthKey") {
+    // A public server with no key is the case that refuses to start.
+    CHECK(TConfig::MissingAuthKey(false, ""));
+    // A private one runs, so the rule must not fire.
+    CHECK_FALSE(TConfig::MissingAuthKey(true, ""));
+    // Any key is enough here; whether it is valid is a separate warning.
+    CHECK_FALSE(TConfig::MissingAuthKey(false, std::string(36, 'a')));
+    CHECK_FALSE(TConfig::MissingAuthKey(true, std::string(36, 'a')));
+}
+
 TConfig::TConfig(const std::string& ConfigFileName)
     : mConfigFileName(ConfigFileName) {
     Application::SetSubsystemStatus("Config", Application::Status::Starting);
@@ -131,7 +141,7 @@ void TConfig::FlushToFile() {
     // auto data = toml::parse<toml::preserve_comments>(mConfigFileName);
     auto data = toml::value {};
     data["General"][StrAuthKey.data()] = Application::Settings.getAsString(Settings::Key::General_AuthKey);
-    SetComment(data["General"][StrAuthKey.data()].comments(), " AuthKey has to be filled out in order to run the server");
+    SetComment(data["General"][StrAuthKey.data()].comments(), " AuthKey from https://keymaster.beammp.com - required unless Private = true");
     data["General"][StrLogChat.data()] = Application::Settings.getAsBool(Settings::Key::General_LogChat);
     SetComment(data["General"][StrLogChat.data()].comments(), " Whether to log chat messages in the console / log");
     data["General"][StrDebug.data()] = Application::Settings.getAsBool(Settings::Key::General_Debug);
@@ -240,6 +250,10 @@ void TConfig::TryReadValue(toml::value& Table, const std::string& Category, cons
         Application::Settings.get(key));
 }
 
+bool TConfig::MissingAuthKey(bool Private, const std::string& AuthKey) {
+    return !Private && AuthKey.empty();
+}
+
 void TConfig::ParseFromFile(std::string_view name) {
     try {
         toml::value data {};
@@ -288,12 +302,15 @@ void TConfig::ParseFromFile(std::string_view name) {
     if (!mDisableConfig) {
         FlushToFile();
     }
-    // all good so far, let's check if there's a key
-    if (Application::Settings.getAsString(Settings::Key::General_AuthKey).empty()) {
+    // all good so far, let's check if there's a key. A private server is neither
+    // listed nor authenticated, so it can start without one; a public server
+    // cannot, and now says where to get a key instead of only failing.
+    if (MissingAuthKey(Application::Settings.getAsBool(Settings::Key::General_Private),
+            Application::Settings.getAsString(Settings::Key::General_AuthKey))) {
         if (mDisableConfig) {
             beammp_error("No AuthKey specified in the environment.");
         } else {
-            beammp_error("No AuthKey specified in the \"" + std::string(mConfigFileName) + "\" file. Please get an AuthKey, enter it into the config file, and restart this server.");
+            beammp_warn("No authentication key installed. Please generate one at https://keymaster.beammp.com and add it to the configuration.");
         }
         Application::SetSubsystemStatus("Config", Application::Status::Bad);
         mFailed = true;

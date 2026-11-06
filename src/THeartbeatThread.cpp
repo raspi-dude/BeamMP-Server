@@ -59,6 +59,12 @@ void THeartbeatThread::operator()() {
         auto Target = "/heartbeat";
         unsigned int ResponseCode = 0;
 
+        // A private server is not listed and does not need a key to run, so a
+        // heartbeat refused for its key is its normal state rather than an
+        // error. Keys are 36 characters, the rule the config check already uses.
+        const bool QuietKeyRejection = Application::Settings.getAsBool(Settings::Key::General_Private)
+            && Application::Settings.getAsString(Settings::Key::General_AuthKey).size() != 36;
+
         nlohmann::json Doc;
         bool Ok = false;
         for (const auto& Url : Application::GetBackendUrlsInOrder()) {
@@ -74,7 +80,9 @@ void THeartbeatThread::operator()() {
                     beammp_trace("Backend response failed to parse as valid json");
                 }
             } else if (ResponseCode != 200) {
-                beammp_errorf("Response code from the heartbeat: {}", ResponseCode);
+                if (!QuietKeyRejection) {
+                    beammp_errorf("Response code from the heartbeat: {}", ResponseCode);
+                }
             } else {
                 // all ok
                 Ok = true;

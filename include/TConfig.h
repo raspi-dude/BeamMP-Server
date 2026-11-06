@@ -34,6 +34,10 @@ public:
     explicit TConfig(const std::string& ConfigFileName);
 
     [[nodiscard]] bool Failed() const { return mFailed; }
+    /// True when the server must refuse to start: it is public (not `Private`)
+    /// and has no AuthKey. A private server is neither listed nor authenticated,
+    /// so it may run without one.
+    [[nodiscard]] static bool MissingAuthKey(bool Private, const std::string& AuthKey);
 
     void FlushToFile();
     void PrintDebug();
