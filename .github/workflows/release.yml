@@ -1,9 +1,21 @@
 name: Release Create & Build
+
+# A tag push publishes a release. workflow_dispatch does the same from the
+# Actions tab, so a build can be published without touching git by hand.
 on:
   push:
-    # Sequence of patterns matched against refs/tags
     tags:
-      - "v*" # Push events to matching v*, i.e. v1.0, v20.15.10
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish, e.g. v3.5.0-rh1 (created at this commit if it does not exist)"
+        required: true
+        type: string
+
+# create/upload release needs write access; the default token is often read-only.
+permissions:
+  contents: write
 
 env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
@@ -11,29 +23,8 @@ env:
   DEBIAN_FRONTEND: "noninteractive"
 
 jobs:
-  create-release:
-    runs-on: ubuntu-latest
-    name: Create Release
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-    steps:
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: ${{ github.ref }}
-          draft: false
-          prerelease: true
-          body: |
-            Files included in this release are:
-            - `BeamMP-Server-RaspiHost.$DISTRO.$DISTROVERSION.$ARCH` for linux builds, for example `BeamMP-Server-RaspiHost.debian.12.x86_64` for the Debian 12 build for x86_64. All require `liblua5.3` to be installed.
-
   x86_64-matrix:
     runs-on: ubuntu-22.04
-    needs: create-release
     strategy:
       matrix:
         include:
@@ -77,31 +68,33 @@ jobs:
       - name: Build Server
         run: bash ./scripts/${{ matrix.distro }}-${{ matrix.version }}/3-build.sh
 
-      - name: Upload Release Asset
-        id: upload-release-asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          asset_name: BeamMP-Server-RaspiHost.${{ matrix.distro }}.${{ matrix.version }}.x86_64
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./bin/BeamMP-Server
-          asset_content_type: application/x-elf
+      # Rename before uploading: the release action takes the asset name from
+      # the file name, and every matrix job builds a file called BeamMP-Server.
+      - name: Stage release assets
+        run: |
+          cp ./bin/BeamMP-Server "BeamMP-Server-RaspiHost.${{ matrix.distro }}.${{ matrix.version }}.x86_64"
+          cp ./bin/BeamMP-Server.debug "debuginfo.${{ matrix.distro }}.${{ matrix.version }}.x86_64"
 
-      - name: Upload Debug Info
-        id: upload-debug-info
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
         with:
-          asset_name: debuginfo.${{ matrix.distro }}.${{ matrix.version }}.x86_64
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./bin/BeamMP-Server.debug
-          asset_content_type: application/x-elf
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: ${{ inputs.tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          prerelease: false
+          make_latest: true
+          generate_release_notes: true
+          body: |
+            Files included in this release are:
+            - `BeamMP-Server-RaspiHost.<distro>.<version>.<arch>`, for example
+              `BeamMP-Server-RaspiHost.debian.12.x86_64`. All require `liblua5.3`.
+            - `debuginfo.<distro>.<version>.<arch>`, only needed to read a crash stack.
+          files: |
+            BeamMP-Server-RaspiHost.${{ matrix.distro }}.${{ matrix.version }}.x86_64
+            debuginfo.${{ matrix.distro }}.${{ matrix.version }}.x86_64
 
   arm64-matrix:
     runs-on: ubuntu-22.04-arm
-    needs: create-release
     strategy:
       matrix:
         include:
@@ -148,24 +141,25 @@ jobs:
       - name: Build Server
         run: bash ./scripts/${{ matrix.distro }}-${{ matrix.version }}/3-build.sh
 
-      - name: Upload Release Asset
-        id: upload-release-asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          asset_name: BeamMP-Server-RaspiHost.${{ matrix.distro }}.${{ matrix.version }}.arm64
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./bin/BeamMP-Server
-          asset_content_type: application/x-elf
+      - name: Stage release assets
+        run: |
+          cp ./bin/BeamMP-Server "BeamMP-Server-RaspiHost.${{ matrix.distro }}.${{ matrix.version }}.arm64"
+          cp ./bin/BeamMP-Server.debug "debuginfo.${{ matrix.distro }}.${{ matrix.version }}.arm64"
 
-      - name: Upload Debug Info
-        id: upload-debug-info
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
         with:
-          asset_name: debuginfo.${{ matrix.distro }}.${{ matrix.version }}.arm64
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./bin/BeamMP-Server.debug
-          asset_content_type: application/x-elf
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: ${{ inputs.tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          prerelease: false
+          make_latest: true
+          generate_release_notes: true
+          body: |
+            Files included in this release are:
+            - `BeamMP-Server-RaspiHost.<distro>.<version>.<arch>`, for example
+              `BeamMP-Server-RaspiHost.debian.12.x86_64`. All require `liblua5.3`.
+            - `debuginfo.<distro>.<version>.<arch>`, only needed to read a crash stack.
+          files: |
+            BeamMP-Server-RaspiHost.${{ matrix.distro }}.${{ matrix.version }}.arm64
+            debuginfo.${{ matrix.distro }}.${{ matrix.version }}.arm64
