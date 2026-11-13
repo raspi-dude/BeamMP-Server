@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/.vcpkg-cache,readwrite"
   VCPKG_FORCE_SYSTEM_BINARIES: 1
   CMAKE_BUILD_TYPE: "Release"
   DEBIAN_FRONTEND: "noninteractive"
@@ -55,6 +55,16 @@ jobs:
 
       - name: Install Dependencies
         run: bash ./scripts/${{ matrix.distro }}-${{ matrix.version }}/1-install-deps.sh
+
+      - name: Cache vcpkg binary artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .vcpkg-cache
+            vcpkg/downloads
+          key: vcpkg-${{ matrix.distro }}-${{ matrix.version }}-${{ runner.arch }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ matrix.distro }}-${{ matrix.version }}-${{ runner.arch }}-
 
       - name: Create Build Environment
         run: bash ./scripts/${{ matrix.distro }}-${{ matrix.version }}/2-configure.sh '-DCMAKE_TOOLCHAIN_FILE=./vcpkg/scripts/buildsystems/vcpkg.cmake'
@@ -123,6 +133,16 @@ jobs:
 
       - name: Install Dependencies
         run: bash ./scripts/${{ matrix.distro }}-${{ matrix.version }}/1-install-deps.sh
+
+      - name: Cache vcpkg binary artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .vcpkg-cache
+            vcpkg/downloads
+          key: vcpkg-${{ matrix.distro }}-${{ matrix.version }}-${{ runner.arch }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ matrix.distro }}-${{ matrix.version }}-${{ runner.arch }}-
 
       - name: Create Build Environment
         run: bash ./scripts/${{ matrix.distro }}-${{ matrix.version }}/2-configure.sh '-DCMAKE_TOOLCHAIN_FILE=./vcpkg/scripts/buildsystems/vcpkg.cmake'
