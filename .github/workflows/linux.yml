@@ -56,8 +56,9 @@ jobs:
       - name: Install Dependencies
         run: bash ./scripts/${{ matrix.distro }}-${{ matrix.version }}/1-install-deps.sh
 
-      - name: Cache vcpkg binary artifacts
-        uses: actions/cache@v4
+      - name: Restore vcpkg binary artifacts
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             .vcpkg-cache
@@ -67,7 +68,24 @@ jobs:
             vcpkg-${{ matrix.distro }}-${{ matrix.version }}-${{ runner.arch }}-
 
       - name: Create Build Environment
-        run: bash ./scripts/${{ matrix.distro }}-${{ matrix.version }}/2-configure.sh '-DCMAKE_TOOLCHAIN_FILE=./vcpkg/scripts/buildsystems/vcpkg.cmake'
+        run: |
+          for attempt in 1 2 3; do
+            if bash ./scripts/${{ matrix.distro }}-${{ matrix.version }}/2-configure.sh '-DCMAKE_TOOLCHAIN_FILE=./vcpkg/scripts/buildsystems/vcpkg.cmake'; then
+              exit 0
+            fi
+            echo "::warning::configure attempt $attempt failed (transient download?), retrying"
+            sleep 15
+          done
+          exit 1
+
+      - name: Save vcpkg binary artifacts
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .vcpkg-cache
+            vcpkg/downloads
+          key: vcpkg-${{ matrix.distro }}-${{ matrix.version }}-${{ runner.arch }}-${{ hashFiles('vcpkg.json') }}
 
       - name: Build Server
         run: bash ./scripts/${{ matrix.distro }}-${{ matrix.version }}/3-build.sh
@@ -134,8 +152,9 @@ jobs:
       - name: Install Dependencies
         run: bash ./scripts/${{ matrix.distro }}-${{ matrix.version }}/1-install-deps.sh
 
-      - name: Cache vcpkg binary artifacts
-        uses: actions/cache@v4
+      - name: Restore vcpkg binary artifacts
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             .vcpkg-cache
@@ -145,7 +164,24 @@ jobs:
             vcpkg-${{ matrix.distro }}-${{ matrix.version }}-${{ runner.arch }}-
 
       - name: Create Build Environment
-        run: bash ./scripts/${{ matrix.distro }}-${{ matrix.version }}/2-configure.sh '-DCMAKE_TOOLCHAIN_FILE=./vcpkg/scripts/buildsystems/vcpkg.cmake'
+        run: |
+          for attempt in 1 2 3; do
+            if bash ./scripts/${{ matrix.distro }}-${{ matrix.version }}/2-configure.sh '-DCMAKE_TOOLCHAIN_FILE=./vcpkg/scripts/buildsystems/vcpkg.cmake'; then
+              exit 0
+            fi
+            echo "::warning::configure attempt $attempt failed (transient download?), retrying"
+            sleep 15
+          done
+          exit 1
+
+      - name: Save vcpkg binary artifacts
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .vcpkg-cache
+            vcpkg/downloads
+          key: vcpkg-${{ matrix.distro }}-${{ matrix.version }}-${{ runner.arch }}-${{ hashFiles('vcpkg.json') }}
 
       - name: Build Server
         run: bash ./scripts/${{ matrix.distro }}-${{ matrix.version }}/3-build.sh
