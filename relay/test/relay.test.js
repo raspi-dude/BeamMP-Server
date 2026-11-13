@@ -10,6 +10,9 @@ import { createRelayServer } from '../src/server.js';
 import { RateLimiter } from '../src/rate-limit.js';
 import { IpAllowList, clientIp, normalizeIp } from '../src/net.js';
 import { loadConfig } from '../src/config.js';
+import { SlashCommandBuilder, PermissionFlagsBits } from 'discord.js';
+import { registerCommands, relayCommand } from '../src/bot.js';
+
 
 const CHANNEL = '123456789012345678';
 
@@ -522,4 +525,85 @@ test('HTTP: system messages are passed through without a player name', async () 
     assert.equal(response.status, 200);
     assert.deepEqual(sent, [{ channelId: CHANNEL, name: null, message: '**Server started**', system: true }]);
   });
+});
+
+// ---- slash commands ----
+
+test('/relay is one command with pair, unpair and status subcommands', () => {
+  const command = relayCommand({ SlashCommandBuilder, PermissionFlagsBits });
+
+  assert.equal(command.name, 'relay');
+  assert.deepEqual(command.options.map((option) => option.name), ['pair', 'unpair', 'status']);
+  // type 1 is SUBCOMMAND: no top-level /pair, /unpair or /relay-status remains.
+  assert.deepEqual(command.options.map((option) => option.type), [1, 1, 1]);
+  assert.equal(command.default_member_permissions, String(PermissionFlagsBits.ManageGuild));
+
+  const [pair, unpair, status] = command.options;
+  const channel = (sub) => sub.options.find((option) => option.name === 'channel');
+  assert.equal(channel(pair).required, true);
+  assert.ok(!pair.options.find((option) => option.name === 'label').required);
+  assert.equal(channel(unpair).required, true);
+  assert.deepEqual(status.options, []);
+});
+
+function fakeCommandManager(existing) {
+  const calls = [];
+  return {
+    calls,
+    async fetch(options) {
+      calls.push(['fetch', options?.guildId ?? null]);
+      return new Map(existing.map((entry) => [entry.id, entry]));
+    },
+    async create(command, guildId) {
+      calls.push(['create', command.name, guildId ?? null]);
+    },
+    async delete(id, guildId) {
+      calls.push(['delete', id, guildId ?? null]);
+    },
+    async set() {
+      calls.push(['set']);
+    },
+  };
+}
+
+test('registering /relay leaves another bot\'s commands alone', async () => {
+  const manager = fakeCommandManager([
+    { id: '1', name: 'pair' },
+    { id: '2', name: 'relay-status' },
+    { id: '3', name: 'ticket' },
+  ]);
+
+  await registerCommands(manager, null, relayCommand({ SlashCommandBuilder, PermissionFlagsBits }));
+
+  assert.deepEqual(manager.calls, [
+    ['fetch', null],
+    ['delete', '1', null],
+    ['delete', '2', null],
+    ['create', 'relay', null],
+  ]);
+  // A bulk set() would have erased /ticket along with everything else.
+  assert.equal(manager.calls.some(([method]) => method === 'set'), false);
+});
+
+test('guild registration touches only the commands of that guild', async () => {
+  const manager = fakeCommandManager([{ id: '9', name: 'unpair' }]);
+
+  await registerCommands(manager, '123456789012345678', { name: 'relay' });
+
+  assert.deepEqual(manager.calls, [
+    ['fetch', '123456789012345678'],
+    ['delete', '9', '123456789012345678'],
+    ['create', 'relay', '123456789012345678'],
+  ]);
+});
+
+test('a failed cleanup still registers /relay', async () => {
+  const manager = {
+    async fetch() { throw new Error('Missing Permissions'); },
+    async create() { manager.created = true; },
+  };
+
+  await registerCommands(manager, null, { name: 'relay' });
+
+  assert.equal(manager.created, true);
 });

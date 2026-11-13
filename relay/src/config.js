@@ -9,7 +9,7 @@ import { IpAllowList } from './net.js';
  */
 export const DEFAULT_CONFIG = {
   http: { host: '0.0.0.0', port: 8099 },
-  // Shown to server owners by /pair. Set it, or the reply cannot tell them
+  // Shown to server owners by /relay pair. Set it, or the reply cannot tell them
   // where to point RelayUrl.
   publicUrl: '',
   // Empty means "any IP may connect", which is only sensible for testing.
@@ -146,6 +146,6 @@ export function describeConfig(config) {
       : 'trusted proxies: any peer - set trustedProxies if the relay port is reachable directly');
   }
   lines.push(`rate limit: ${config.rateLimit.perPairing.maxMessages} messages/${config.rateLimit.perPairing.windowSeconds}s per pairing, ${config.rateLimit.perIp.maxRequests} requests/${config.rateLimit.perIp.windowSeconds}s per IP`);
-  lines.push(config.publicUrl ? `public url: ${config.publicUrl}` : 'public url: not set - /pair will print a placeholder');
+  lines.push(config.publicUrl ? `public url: ${config.publicUrl}` : 'public url: not set - /relay pair will print a placeholder');
   return lines.join('\n');
 }

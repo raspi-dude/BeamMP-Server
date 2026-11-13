@@ -1,32 +1,71 @@
-function commandList({ SlashCommandBuilder, PermissionFlagsBits }) {
-  return [
-    new SlashCommandBuilder()
+/** Names this bot registered before every command moved under /relay. */
+const LEGACY_COMMANDS = ['pair', 'unpair', 'relay-status'];
+
+/**
+ * The one slash command this bot owns: /relay, with pair, unpair and status
+ * subcommands. Subcommands keep a single entry in the command picker and leave
+ * the top-level names free for any other bot.
+ */
+export function relayCommand({ SlashCommandBuilder, PermissionFlagsBits }) {
+  return new SlashCommandBuilder()
+    .setName('relay')
+    .setDescription('Bridge a Discord channel with a Raspi Host game server')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addSubcommand((subcommand) => subcommand
       .setName('pair')
-      .setDescription('Pair a channel with a Raspi Host game server and get a pairing code')
+      .setDescription('Pair a channel with a game server and get a pairing code')
       .addChannelOption((option) => option
         .setName('channel')
         .setDescription('The channel game chat should be bridged to')
         .setRequired(true))
       .addStringOption((option) => option
         .setName('label')
-        .setDescription('Optional note, e.g. the server name'))
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .toJSON(),
-    new SlashCommandBuilder()
+        .setDescription('Optional note, e.g. the server name')))
+    .addSubcommand((subcommand) => subcommand
       .setName('unpair')
       .setDescription('Remove the pairing of a channel and invalidate its code')
       .addChannelOption((option) => option
         .setName('channel')
         .setDescription('The channel to unpair')
-        .setRequired(true))
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .toJSON(),
-    new SlashCommandBuilder()
-      .setName('relay-status')
-      .setDescription('Show which channels of this server are paired')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .toJSON(),
-  ];
+        .setRequired(true)))
+    .addSubcommand((subcommand) => subcommand
+      .setName('status')
+      .setDescription('Show which channels of this server are paired'))
+    .toJSON();
+}
+
+/**
+ * Registers /relay without rewriting anything else.
+ *
+ * `commands.set()` replaces the application's entire command list, so a second
+ * bot sharing this token would lose its commands every time the relay restarts.
+ * `create()` writes only the command it is given (and updates one with the same
+ * name), and the only deletions are the three names this bot used to register.
+ */
+export async function registerCommands(manager, guildId, command, log = () => {}) {
+  try {
+    const existing = guildId ? await manager.fetch({ guildId }) : await manager.fetch();
+    for (const stale of [...existing.values()]) {
+      if (!LEGACY_COMMANDS.includes(stale.name)) {
+        continue;
+      }
+      if (guildId) {
+        await manager.delete(stale.id, guildId);
+      } else {
+        await manager.delete(stale.id);
+      }
+      log('bot', `removed the old /${stale.name} command`);
+    }
+  } catch (error) {
+    // A missing Manage Commands scope must not stop /relay being registered.
+    log('warn', `could not remove the old slash commands: ${error.message}`);
+  }
+
+  if (guildId) {
+    await manager.create(command, guildId);
+  } else {
+    await manager.create(command);
+  }
 }
 
 /**
@@ -55,11 +94,12 @@ export async function createBot({ core, token, log = () => {}, onChange = () => 
     try {
       // Global commands: propagation can take a while. Set DISCORD_GUILD_ID to
       // register in one guild instead, which is instant while testing.
-      if (process.env.DISCORD_GUILD_ID) {
-        await readyClient.application.commands.set(commandList({ SlashCommandBuilder, PermissionFlagsBits }), process.env.DISCORD_GUILD_ID);
-      } else {
-        await readyClient.application.commands.set(commandList({ SlashCommandBuilder, PermissionFlagsBits }));
-      }
+      await registerCommands(
+        readyClient.application.commands,
+        process.env.DISCORD_GUILD_ID || null,
+        relayCommand({ SlashCommandBuilder, PermissionFlagsBits }),
+        log,
+      );
       log('bot', 'slash commands registered');
     } catch (error) {
       log('error', `failed to register slash commands: ${error.message}`);
@@ -92,7 +132,12 @@ export async function createBot({ core, token, log = () => {}, onChange = () => 
     }
 
     try {
-      if (interaction.commandName === 'pair') {
+      if (interaction.commandName !== 'relay') {
+        return;
+      }
+      const subcommand = interaction.options.getSubcommand();
+
+      if (subcommand === 'pair') {
         const channel = interaction.options.getChannel('channel', true);
         const label = interaction.options.getString('label') ?? '';
         const { code } = core.createPairing({
@@ -117,7 +162,7 @@ export async function createBot({ core, token, log = () => {}, onChange = () => 
             `PairingCode = "${code}"`,
             '```',
             'The code is a secret: anyone who has it can read and write this channel\'s bridge. ',
-            'Use `/unpair` to revoke it.',
+            'Use `/relay unpair` to revoke it.',
             relayLocked
               ? 'Note: this relay only accepts connections from allowlisted IPs. If the bridge stays silent, ask the relay owner to add your server\'s IP.'
               : '',
@@ -126,7 +171,7 @@ export async function createBot({ core, token, log = () => {}, onChange = () => 
         return;
       }
 
-      if (interaction.commandName === 'unpair') {
+      if (subcommand === 'unpair') {
         const channel = interaction.options.getChannel('channel', true);
         const removed = core.revokeByChannel(channel.id);
         if (removed) {
@@ -139,7 +184,7 @@ export async function createBot({ core, token, log = () => {}, onChange = () => 
         return;
       }
 
-      if (interaction.commandName === 'relay-status') {
+      if (subcommand === 'status') {
         const paired = [...core.pairings.values()]
           .filter((pairing) => pairing.guildId === interaction.guildId)
           .map((pairing) => `• <#${pairing.channelId}> ${pairing.label ? `(${pairing.label})` : ''}`);

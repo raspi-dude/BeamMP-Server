@@ -2,7 +2,7 @@
 
 Central service that bridges many BeamMP servers to Discord through **one** bot
 connection. Game servers never hold a Discord bot token: they only know a
-pairing code for one channel, which is issued by `/pair` in Discord.
+pairing code for one channel, which is issued by `/relay pair` in Discord.
 
 ```
  Discord ──(Gateway WebSocket)── bot ──┐
@@ -55,7 +55,7 @@ npm start
 
 Nothing else is needed — no Administrator, no Manage Messages, no Manage
 Channels, no Manage Server, no webhooks, no voice. **Manage Server is checked on
-the person running `/pair`, not granted to the bot**: the bot reads the
+the person running `/relay pair`, not granted to the bot**: the bot reads the
 interaction's `memberPermissions` and never needs the permission itself. The bot
 never deletes messages, so leave `Manage Messages` off (that also keeps its
 blast radius small if the token leaks).
@@ -100,7 +100,7 @@ Environment variables:
 
 | Key | Meaning |
 |---|---|
-| `publicUrl` | The URL `/pair` prints for `RelayUrl`. Without it the reply contains a placeholder. |
+| `publicUrl` | The URL `/relay pair` prints for `RelayUrl`. Without it the reply contains a placeholder. |
 | `allowedIps` | IPs or CIDR blocks allowed to use the relay. **Empty means any IP may connect** and the relay logs a warning at startup. IPv4-mapped addresses (`::ffff:1.2.3.4`) and `::1` are normalised, so list plain IPv4. |
 | `trustProxy` | Honour `X-Forwarded-For` / `X-Real-IP`. Only enable behind a proxy you control — otherwise a client can claim any IP and walk past `allowedIps`. Only the **rightmost** `X-Forwarded-For` entry is used, i.e. the one the proxy appended, so a client-supplied header cannot spoof the address. |
 | `trustedProxies` | Which peers may send `X-Forwarded-For` at all, like nginx's `set_real_ip_from`. Empty means "any peer may", which is only safe when the relay port is unreachable except through the proxy. Non-empty **implies** `trustProxy` for those addresses, so you can leave the flag alone. Same IP/CIDR syntax as `allowedIps`, and a typo aborts startup. |
@@ -120,7 +120,7 @@ game server prints the same thing in its console (`discord` command shows it as
 |---|---|---|
 | 403 | `ip_not_allowed` | The game server's IP is not in `allowedIps`. |
 | 429 | `rate_limited` | Over the per-pairing or per-IP limit; `retryAfter` says how long. |
-| 401 | `invalid pairing code` | Code unknown or revoked; run `/pair` again. |
+| 401 | `invalid pairing code` | Code unknown or revoked; run `/relay pair` again. |
 | 502 | `discord_send_failed` | The bot cannot post in that channel (missing, or no permission). |
 
 Put a TLS reverse proxy (Caddy, nginx, Traefik) in front: game servers should
@@ -288,7 +288,7 @@ curl -s https://relay.example.com/v1/relay/send \
 In the Discord channel's server, someone with **Manage Server** runs:
 
 ```
-/pair channel:#game-chat label:MyServer
+/relay pair channel:#game-chat label:MyServer
 ```
 
 The bot replies with a code. That code goes into the game server's config:
@@ -300,7 +300,12 @@ RelayUrl = "https://relay.example.com"
 PairingCode = "ABCDEFGHJK"
 ```
 
-`/unpair channel:#game-chat` revokes the code; re-pairing rotates it.
+`/relay unpair channel:#game-chat` revokes the code; re-pairing rotates it.
+`/relay status` lists the channels of the current server that are paired.
+
+The bot owns the `/relay` command and nothing else. It updates that command in
+place instead of rewriting the application's command list, so if another bot
+runs on the same token, its commands stay registered.
 
 ## Protocol
 
