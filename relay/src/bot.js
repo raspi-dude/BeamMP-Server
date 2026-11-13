@@ -147,25 +147,17 @@ export async function createBot({ core, token, log = () => {}, onChange = () => 
         });
         onChange();
         log('pair', `channel ${channel.id} (${interaction.guild.name}) paired`);
-        const relayLine = publicUrl
-          ? `RelayUrl = "${publicUrl}"`
-          : 'RelayUrl = "https://your-relay-url"   # set publicUrl in the relay config';
         await interaction.reply({
           ephemeral: true,
           content: [
-            `Paired <#${channel.id}>. Add these two lines to that server's \`RaspiConfig.toml\`:`,
+            `Paired <#${channel.id}>. Enter these in the Raspi Host panel for that server:`,
             '',
-            '```toml',
-            '[Discord]',
-            'Enabled = true',
-            relayLine,
-            `PairingCode = "${code}"`,
-            '```',
-            'The code is a secret: anyone who has it can read and write this channel\'s bridge. ',
-            'Use `/relay unpair` to revoke it.',
-            relayLocked
-              ? 'Note: this relay only accepts connections from allowlisted IPs. If the bridge stays silent, ask the relay owner to add your server\'s IP.'
-              : '',
+            `**Relay URL:** \`${publicUrl || 'https://your-relay-url'}\``,
+            `**Pairing code:** \`${code}\``,
+            publicUrl ? '' : 'The relay owner has not set `publicUrl` in the relay config yet.',
+            '',
+            'The code is a secret: anyone who has it can read and write this channel\'s bridge. Use `/relay unpair` to revoke it.',
+            relayLocked ? 'Note: this relay only accepts connections from Raspi Host servers.' : '',
           ].join('\n'),
         });
         return;

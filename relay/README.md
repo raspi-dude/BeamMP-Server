@@ -17,7 +17,7 @@ pairing code for one channel, which is issued by `/relay pair` in Discord.
   token per customer.
 - Rate limits stay in one place: bots share buckets per token, webhooks and
   polling per customer would multiply requests from a single IP.
-- Customers only copy a short code into `RaspiConfig.toml`.
+- Customers only paste a relay URL and a short code into the panel.
 
 ## Setup
 
@@ -291,14 +291,10 @@ In the Discord channel's server, someone with **Manage Server** runs:
 /relay pair channel:#game-chat label:MyServer
 ```
 
-The bot replies with a code. That code goes into the game server's config:
+The bot replies with the relay URL and a pairing code for that server panel:
 
-```toml
-[Discord]
-Enabled = true
-RelayUrl = "https://relay.example.com"
-PairingCode = "ABCDEFGHJK"
-```
+- **Relay URL:** `https://relay.example.com`
+- **Pairing code:** `ABCDEFGHJK`
 
 `/relay unpair channel:#game-chat` revokes the code; re-pairing rotates it.
 `/relay status` lists the channels of the current server that are paired.
