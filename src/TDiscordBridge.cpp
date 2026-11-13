@@ -60,17 +60,30 @@ std::string SanitizeLine(std::string Text) {
     return Text.substr(Begin, End - Begin + 1);
 }
 
-/// Strips the markdown characters the relay would otherwise interpret, so a
-/// player cannot fake formatting (or look like a system event) in Discord.
+/// Escapes the Discord markdown characters in a name instead of deleting
+/// them: a player called my_name must read as my_name in Discord, not as
+/// myname. The escape also stops a crafted name from faking formatting or
+/// looking like a system event.
+std::string EscapeMarkdown(const std::string& Text) {
+    std::string Escaped;
+    Escaped.reserve(Text.size() + 8);
+    for (const char Character : Text) {
+        if (Character == '\\' || Character == '*' || Character == '_' || Character == '~' || Character == '`') {
+            Escaped.push_back('\\');
+        }
+        Escaped.push_back(Character);
+    }
+    return Escaped;
+}
+
+/// Strips control characters and normalises whitespace. Markdown is escaped
+/// where a name is interpolated into a line, so names keep their spelling.
 std::string SanitizeName(std::string Name) {
     for (char& Character : Name) {
         if (Character == '\n' || Character == '\r' || Character == '\t') {
             Character = ' ';
         }
     }
-    Name.erase(std::remove_if(Name.begin(), Name.end(),
-                   [](char Character) { return Character == '*' || Character == '_' || Character == '~' || Character == '`'; }),
-        Name.end());
     Name = SanitizeLine(Name);
     if (Name.empty()) {
         return "Player";
@@ -291,18 +304,18 @@ void TDiscordBridge::AnnounceServerStarted() {
     EnqueueSystem("**Server started**");
 }
 
-void TDiscordBridge::AnnouncePlayerJoin(const std::string& PlayerName) {
+void TDiscordBridge::AnnouncePlayerJoin(const std::string& PlayerName, size_t PlayerCount, size_t MaxPlayers) {
     if (!mState || !mSettings.RelayEvents) {
         return;
     }
-    EnqueueSystem(fmt::format("**{}** joined the server", SanitizeName(PlayerName)));
+    EnqueueSystem(fmt::format("**{}** ({}/{}) joined the server", EscapeMarkdown(SanitizeName(PlayerName)), PlayerCount, MaxPlayers));
 }
 
 void TDiscordBridge::AnnouncePlayerLeave(const std::string& PlayerName) {
     if (!mState || !mSettings.RelayEvents) {
         return;
     }
-    EnqueueSystem(fmt::format("**{}** left the server", SanitizeName(PlayerName)));
+    EnqueueSystem(fmt::format("**{}** left the server", EscapeMarkdown(SanitizeName(PlayerName))));
 }
 
 std::string TDiscordBridge::Status() const {

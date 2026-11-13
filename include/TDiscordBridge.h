@@ -64,7 +64,7 @@ public:
     /// Events forwarded to Discord when [Discord] RelayEvents is on. All of
     /// them are no-ops while the bridge is disabled.
     void AnnounceServerStarted();
-    void AnnouncePlayerJoin(const std::string& PlayerName);
+    void AnnouncePlayerJoin(const std::string& PlayerName, size_t PlayerCount, size_t MaxPlayers);
     void AnnouncePlayerLeave(const std::string& PlayerName);
 
     /// Human readable status, used by the console `discord` command.

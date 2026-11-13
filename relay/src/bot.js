@@ -204,11 +204,11 @@ export async function createBot({ core, token, log = () => {}, onChange = () => 
   };
 }
 
-/** Players cannot inject Discord markdown (or a fake system event). */
+/** Escapes Discord markdown rather than deleting it, so my_name reads as my_name. */
 function safeName(name) {
   const text = String(name ?? 'Player')
     .replace(/[\r\n\t]+/g, ' ')
-    .replace(/[*_~`]/g, '')
+    .replace(/([\\*_~`])/g, '\\$1')
     .trim()
     .slice(0, 64);
   return text || 'Player';

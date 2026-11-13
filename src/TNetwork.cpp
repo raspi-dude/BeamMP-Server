@@ -1341,7 +1341,10 @@ bool TNetwork::SyncClient(const std::weak_ptr<TClient>& c) {
     LockedClient->SetIsSynced(true);
     beammp_info(LockedClient->GetName() + (" is now synced!"));
     // No-op unless the Discord bridge is enabled.
-    Application::Discord().AnnouncePlayerJoin(LockedClient->GetName());
+    Application::Discord().AnnouncePlayerJoin(
+        LockedClient->GetName(),
+        mServer.ClientCount(),
+        static_cast<size_t>(Application::Settings.getAsInt(Settings::Key::General_MaxPlayers)));
     return true;
 }
 
