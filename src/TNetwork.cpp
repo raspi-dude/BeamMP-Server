@@ -1028,7 +1028,9 @@ void TNetwork::OnDisconnect(const std::weak_ptr<TClient>& ClientPtr) {
     SendToAll(&c, StringToVector(Packet), false, true);
     // Only players that actually got in are worth announcing.
     if (c.IsSynced()) {
-        Application::Discord().AnnouncePlayerLeave(c.GetName());
+        // ClientCount() still includes the player who is leaving right now.
+        const size_t Count = mServer.ClientCount();
+        Application::Discord().AnnouncePlayerLeave(c.GetName(), Count > 0 ? Count - 1 : 0, static_cast<size_t>(Application::Settings.getAsInt(Settings::Key::General_MaxPlayers)));
     }
     Packet.clear();
     auto Futures = LuaAPI::MP::Engine->TriggerEvent("onPlayerDisconnect", "", c.GetID());

@@ -65,7 +65,9 @@ public:
     /// them are no-ops while the bridge is disabled.
     void AnnounceServerStarted();
     void AnnouncePlayerJoin(const std::string& PlayerName, size_t PlayerCount, size_t MaxPlayers);
-    void AnnouncePlayerLeave(const std::string& PlayerName);
+    /// PlayerCount is the count shown in the line, so for a leave it is the
+    /// total after the player has been removed.
+    void AnnouncePlayerLeave(const std::string& PlayerName, size_t PlayerCount, size_t MaxPlayers);
 
     /// Human readable status, used by the console `discord` command.
     [[nodiscard]] std::string Status() const;

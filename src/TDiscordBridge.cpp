@@ -308,14 +308,14 @@ void TDiscordBridge::AnnouncePlayerJoin(const std::string& PlayerName, size_t Pl
     if (!mState || !mSettings.RelayEvents) {
         return;
     }
-    EnqueueSystem(fmt::format("**{}** ({}/{}) joined the server", EscapeMarkdown(SanitizeName(PlayerName)), PlayerCount, MaxPlayers));
+    EnqueueSystem(fmt::format("**{}** joined the server ({}/{})", EscapeMarkdown(SanitizeName(PlayerName)), PlayerCount, MaxPlayers));
 }
 
-void TDiscordBridge::AnnouncePlayerLeave(const std::string& PlayerName) {
+void TDiscordBridge::AnnouncePlayerLeave(const std::string& PlayerName, size_t PlayerCount, size_t MaxPlayers) {
     if (!mState || !mSettings.RelayEvents) {
         return;
     }
-    EnqueueSystem(fmt::format("**{}** left the server", EscapeMarkdown(SanitizeName(PlayerName))));
+    EnqueueSystem(fmt::format("**{}** left the server ({}/{})", EscapeMarkdown(SanitizeName(PlayerName)), PlayerCount, MaxPlayers));
 }
 
 std::string TDiscordBridge::Status() const {
