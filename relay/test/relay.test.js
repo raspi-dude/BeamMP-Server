@@ -11,7 +11,7 @@ import { RateLimiter } from '../src/rate-limit.js';
 import { IpAllowList, clientIp, normalizeIp } from '../src/net.js';
 import { loadConfig } from '../src/config.js';
 import { SlashCommandBuilder, PermissionFlagsBits } from 'discord.js';
-import { registerCommands, relayCommand } from '../src/bot.js';
+import { registerCommands, relayCommand, createDiscordSender } from '../src/bot.js';
 
 
 const CHANNEL = '123456789012345678';
@@ -525,6 +525,39 @@ test('HTTP: system messages are passed through without a player name', async () 
     assert.equal(response.status, 200);
     assert.deepEqual(sent, [{ channelId: CHANNEL, name: null, message: '**Server started**', system: true }]);
   });
+});
+
+// ---- discord sender ----
+
+function fakeDiscordClient(sent) {
+  return {
+    channels: {
+      async fetch() {
+        return {
+          isTextBased: () => true,
+          async send(payload) { sent.push(payload.content); },
+        };
+      },
+    },
+  };
+}
+
+test('chat sent to Discord escapes markdown so censored words stay visible', async () => {
+  const sent = [];
+  const send = createDiscordSender({ client: fakeDiscordClient(sent) });
+
+  await send({ channelId: CHANNEL }, { name: 'Raspi_dude', message: 'you ****' });
+
+  assert.deepEqual(sent, ['**Raspi\\_dude**: you \\*\\*\\*\\*']);
+});
+
+test('system lines are delivered verbatim so the server formatting is kept', async () => {
+  const sent = [];
+  const send = createDiscordSender({ client: fakeDiscordClient(sent) });
+
+  await send({ channelId: CHANNEL }, { message: '**Raspi_dude** joined the server (1/8)', system: true });
+
+  assert.deepEqual(sent, ['**Raspi_dude** joined the server (1/8)']);
 });
 
 // ---- slash commands ----

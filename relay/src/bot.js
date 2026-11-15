@@ -204,6 +204,15 @@ export async function createBot({ core, token, log = () => {}, onChange = () => 
   };
 }
 
+/**
+ * Escapes Discord markdown in a chat line. Censored words arrive from the game
+ * server as runs of '*', which Discord would otherwise eat as bold/italics; a
+ * backslash makes Discord show them literally instead.
+ */
+function safeMessage(message) {
+  return String(message ?? '').replace(/([\\*_~`])/g, '\\$1');
+}
+
 /** Escapes Discord markdown rather than deleting it, so my_name reads as my_name. */
 function safeName(name) {
   const text = String(name ?? 'Player')
@@ -217,10 +226,10 @@ function safeName(name) {
 /**
  * Sends a game message into the paired Discord channel.
  *
- * Chat lines are prefixed with the player name; system lines (server started,
- * player joined, ...) are sent verbatim because the game server already
- * formatted them. Mention parsing is disabled on both so nothing a player
- * types can ping @everyone.
+ * Chat lines are prefixed with the player name and have their markdown escaped;
+ * system lines (server started, player joined, ...) are sent verbatim because
+ * the game server already formatted them. Mention parsing is disabled on both
+ * so nothing a player types can ping @everyone.
  */
 export function createDiscordSender({ client, log = () => {} }) {
   return async function sendToDiscord(pairing, { name, message, system = false }) {
@@ -228,7 +237,7 @@ export function createDiscordSender({ client, log = () => {} }) {
     if (!channel || !channel.isTextBased()) {
       throw new Error(`channel ${pairing.channelId} is missing, not text based, or not visible to the bot`);
     }
-    const content = system ? String(message) : `**${safeName(name)}**: ${message}`;
+    const content = system ? String(message) : `**${safeName(name)}**: ${safeMessage(message)}`;
     await channel.send({ content, allowedMentions: { parse: [] } });
     log('relay', system ? 'delivered system line' : `delivered message from ${safeName(name)}`);
   };
