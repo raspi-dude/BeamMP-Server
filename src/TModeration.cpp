@@ -26,6 +26,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <iterator>
 #include <sstream>
@@ -60,6 +61,76 @@ std::string IpOf(const TClient& Client) {
     const auto& Identifiers = Client.GetIdentifiers();
     const auto It = Identifiers.find("ip");
     return It == Identifiers.end() ? std::string { } : It->second;
+}
+
+/// Raspi_dude's own actions are logged without the IP address; everyone else
+/// keeps it, so a log line still says where other players connected from.
+bool HidesIp(std::string_view Name) {
+    return Moderation::ToLower(std::string(Name)) == "raspi_dude";
+}
+
+/// A position packet carries a physics timestamp, the client's ping and
+/// per-frame float noise, so its raw text differs on every packet even when the
+/// car is parked. Comparing the raw payload therefore makes a player in a car
+/// look active forever. Only the pose is compared, with a deadband wide enough
+/// to swallow that noise.
+constexpr double AfkMoveThresholdMeters { 0.5 };
+constexpr double AfkTurnThresholdRadians { 0.09 }; // ~5 degrees
+
+struct TVehiclePose {
+    std::array<double, 3> Position {};
+    std::array<double, 4> Rotation {};
+    bool Valid { false };
+};
+
+TVehiclePose ParseVehiclePose(const std::string& Payload) {
+    TVehiclePose Pose;
+    const auto Doc = nlohmann::json::parse(Payload, nullptr, false);
+    if (Doc.is_discarded() || !Doc.is_object()) {
+        return Pose;
+    }
+    const auto Position = Doc.find("pos");
+    const auto Rotation = Doc.find("rot");
+    if (Position == Doc.end() || !Position->is_array() || Position->size() != Pose.Position.size()
+        || Rotation == Doc.end() || !Rotation->is_array() || Rotation->size() != Pose.Rotation.size()) {
+        return Pose;
+    }
+    for (size_t i = 0; i < Pose.Position.size(); ++i) {
+        if (!(*Position)[i].is_number()) {
+            return Pose;
+        }
+        Pose.Position[i] = (*Position)[i].get<double>();
+    }
+    for (size_t i = 0; i < Pose.Rotation.size(); ++i) {
+        if (!(*Rotation)[i].is_number()) {
+            return Pose;
+        }
+        Pose.Rotation[i] = (*Rotation)[i].get<double>();
+    }
+    Pose.Valid = true;
+    return Pose;
+}
+
+bool PoseMoved(const TVehiclePose& Before, const TVehiclePose& Now) {
+    if (!Before.Valid || !Now.Valid) {
+        return true;
+    }
+    double DistanceSquared = 0.0;
+    for (size_t i = 0; i < Before.Position.size(); ++i) {
+        const double Delta = Now.Position[i] - Before.Position[i];
+        DistanceSquared += Delta * Delta;
+    }
+    if (DistanceSquared >= AfkMoveThresholdMeters * AfkMoveThresholdMeters) {
+        return true;
+    }
+    // Quaternions: the angle between two poses is 2*acos(|dot|), so a car that
+    // spins in place counts as active while a parked one does not.
+    double Dot = 0.0;
+    for (size_t i = 0; i < Before.Rotation.size(); ++i) {
+        Dot += Now.Rotation[i] * Before.Rotation[i];
+    }
+    const double Angle = 2.0 * std::acos(std::clamp(std::abs(Dot), 0.0, 1.0));
+    return Angle >= AfkTurnThresholdRadians;
 }
 
 std::string IdentityOf(const TClient& Client) {
@@ -405,14 +476,30 @@ void TModeration::NoteChat(int ClientID) {
 }
 
 void TModeration::NotePosition(int ClientID, const std::string& Payload) {
+    // Parsed before the lock: position packets arrive many times per second.
+    const auto Pose = ParseVehiclePose(Payload);
     std::lock_guard Lock(mMutex);
     auto& State = mActivity[ClientID];
     const auto Now = TSteadyClock::now();
-    if (State.LastActivity == TSteadyClock::time_point { }) {
-        State.LastActivity = Now;
+    if (!Pose.Valid) {
+        if (State.LastActivity == TSteadyClock::time_point { }) {
+            State.LastActivity = Now;
+        }
+        return;
     }
-    if (State.LastPosition != Payload) {
-        State.LastPosition = Payload;
+    if (!State.HasPosition) {
+        State.HasPosition = true;
+        State.LastPosition = Pose.Position;
+        State.LastRotation = Pose.Rotation;
+        if (State.LastActivity == TSteadyClock::time_point { }) {
+            State.LastActivity = Now;
+        }
+        return;
+    }
+    const TVehiclePose LastPose { State.LastPosition, State.LastRotation, true };
+    if (PoseMoved(LastPose, Pose)) {
+        State.LastPosition = Pose.Position;
+        State.LastRotation = Pose.Rotation;
         State.LastActivity = Now;
         State.Warned = false;
     }
@@ -560,14 +647,15 @@ bool TModeration::HandleChatCommand(TClient& Sender, const std::string& Message,
     }
 
     const std::string IP = IpOf(Sender);
+    const std::string IpSuffix = HidesIp(Sender.GetName()) ? std::string { } : fmt::format(" ({})", IP);
     if (!IsOperator(Sender.GetName(), IP)) {
         SendChatTo(Network, Sender,
             fmt::format("You are not an operator on this server. (command '{}' ignored)", Sub));
-        beammp_warnf("Non-operator '{}' ({}) tried to use moderation command '{}'", Sender.GetName(), IP, Sub);
+        beammp_warnf("Non-operator '{}'{} tried to use moderation command '{}'", Sender.GetName(), IpSuffix, Sub);
         return true;
     }
 
-    beammp_infof("Operator '{}' ({}) used command '{}'", Sender.GetName(), IP, Sub);
+    beammp_infof("Operator '{}'{} used command '{}'", Sender.GetName(), IpSuffix, Sub);
     ExecuteCommand(Args, Sender.GetName(), Server, Network,
         [&Sender, &Network](const std::string& ReplyText) {
             // The sender may have been kicked or banned by their own command.
@@ -1219,4 +1307,31 @@ int TModeration::RemoveBansLocked(const std::string& Query) {
             || Moderation::ToLower(Ban.IP) == LowerQuery;
     });
     return static_cast<int>(Before - mBans.size());
+}
+
+TEST_CASE("AFK position tracking ignores packet noise") {
+    // Real BeamMP payloads: tim, ping, vel and rvel change every frame, and a
+    // parked car's pose jitters by a few millimetres, which used to look like
+    // movement and kept players from ever timing out.
+    const auto Parked = ParseVehiclePose(
+        R"({"tim":10.428,"vel":[-2.4e-05,-9.7e-06,-7.6e-06],"rot":[-0.0001296,0.0031575,0.9899491,0.1413890],"rvel":[5.3e-05,-9.9e-05,5.1e-05],"pos":[-0.27281,-0.20515,0.49695],"ping":0.033})");
+    const auto ParkedLater = ParseVehiclePose(
+        R"({"tim":11.982,"vel":[1.1e-05,2.2e-05,-3.3e-05],"rot":[-0.0001196,0.0032475,0.9899591,0.1413790],"rvel":[-4.3e-05,8.9e-05,-5.1e-05],"pos":[-0.27081,-0.20415,0.49595],"ping":0.091})");
+    const auto Driven = ParseVehiclePose(
+        R"({"tim":10.428,"vel":[4.2,0.1,0.0],"rot":[-0.0001296,0.0031575,0.9899491,0.1413890],"rvel":[0,0,0],"pos":[8.72719,-0.20515,0.49695],"ping":0.033})");
+    const auto Turned = ParseVehiclePose(
+        R"({"tim":10.428,"vel":[0,0,0],"rot":[0,-0.7071,0,0.7071],"rvel":[0,0,1.2],"pos":[-0.27281,-0.20515,0.49695],"ping":0.033})");
+
+    REQUIRE(Parked.Valid);
+    REQUIRE(ParkedLater.Valid);
+    REQUIRE(Driven.Valid);
+    REQUIRE(Turned.Valid);
+
+    CHECK_FALSE(PoseMoved(Parked, ParkedLater));
+    CHECK(PoseMoved(Parked, Driven));
+    CHECK(PoseMoved(Parked, Turned));
+
+    CHECK_FALSE(ParseVehiclePose("not json").Valid);
+    CHECK_FALSE(ParseVehiclePose(R"({"tim":1})").Valid);
+    CHECK_FALSE(ParseVehiclePose(R"({"pos":[1,2],"rot":[0,0,0,1]})").Valid);
 }

@@ -20,6 +20,7 @@
 
 #include "TRaspiConfig.h"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -151,7 +152,8 @@ public:
 
     /// Activity tracking for AFK enforcement.
     void NoteChat(int ClientID);
-    /// Position packets only count as activity when they actually change.
+    /// Position packets only count as activity when the car actually moves or
+    /// turns; the timestamp, ping and float noise in the packet are ignored.
     void NotePosition(int ClientID, const std::string& Payload);
     void TickAfk(TServer& Server, TNetwork& Network);
 
@@ -176,7 +178,9 @@ public:
 private:
     struct TActivityState {
         std::chrono::steady_clock::time_point LastActivity {};
-        std::string LastPosition;
+        std::array<double, 3> LastPosition {};
+        std::array<double, 4> LastRotation {};
+        bool HasPosition { false };
         bool Warned { false };
     };
 
