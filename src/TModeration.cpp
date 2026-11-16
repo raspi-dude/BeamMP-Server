@@ -85,7 +85,12 @@ struct TVehiclePose {
 
 TVehiclePose ParseVehiclePose(const std::string& Payload) {
     TVehiclePose Pose;
-    const auto Doc = nlohmann::json::parse(Payload, nullptr, false);
+    // Callers pass the whole "Zp:<pid>-<vid>:<json>" packet; only the JSON
+    // object after the prefix can be parsed.
+    const auto BodyBegin = Payload.find('{');
+    const auto Body = BodyBegin == std::string::npos ? std::string_view { Payload }
+                                                     : std::string_view { Payload }.substr(BodyBegin);
+    const auto Doc = nlohmann::json::parse(Body.begin(), Body.end(), nullptr, false);
     if (Doc.is_discarded() || !Doc.is_object()) {
         return Pose;
     }
@@ -1313,25 +1318,31 @@ TEST_CASE("AFK position tracking ignores packet noise") {
     // Real BeamMP payloads: tim, ping, vel and rvel change every frame, and a
     // parked car's pose jitters by a few millimetres, which used to look like
     // movement and kept players from ever timing out.
-    const auto Parked = ParseVehiclePose(
-        R"({"tim":10.428,"vel":[-2.4e-05,-9.7e-06,-7.6e-06],"rot":[-0.0001296,0.0031575,0.9899491,0.1413890],"rvel":[5.3e-05,-9.9e-05,5.1e-05],"pos":[-0.27281,-0.20515,0.49695],"ping":0.033})");
-    const auto ParkedLater = ParseVehiclePose(
-        R"({"tim":11.982,"vel":[1.1e-05,2.2e-05,-3.3e-05],"rot":[-0.0001196,0.0032475,0.9899591,0.1413790],"rvel":[-4.3e-05,8.9e-05,-5.1e-05],"pos":[-0.27081,-0.20415,0.49595],"ping":0.091})");
-    const auto Driven = ParseVehiclePose(
-        R"({"tim":10.428,"vel":[4.2,0.1,0.0],"rot":[-0.0001296,0.0031575,0.9899491,0.1413890],"rvel":[0,0,0],"pos":[8.72719,-0.20515,0.49695],"ping":0.033})");
-    const auto Turned = ParseVehiclePose(
-        R"({"tim":10.428,"vel":[0,0,0],"rot":[0,-0.7071,0,0.7071],"rvel":[0,0,1.2],"pos":[-0.27281,-0.20515,0.49695],"ping":0.033})");
+    const std::string ParkedJson = R"({"tim":10.428,"vel":[-2.4e-05,-9.7e-06,-7.6e-06],"rot":[-0.0001296,0.0031575,0.9899491,0.1413890],"rvel":[5.3e-05,-9.9e-05,5.1e-05],"pos":[-0.27281,-0.20515,0.49695],"ping":0.033})";
+    const std::string ParkedLaterJson = R"({"tim":11.982,"vel":[1.1e-05,2.2e-05,-3.3e-05],"rot":[-0.0001196,0.0032475,0.9899591,0.1413790],"rvel":[-4.3e-05,8.9e-05,-5.1e-05],"pos":[-0.27081,-0.20415,0.49595],"ping":0.091})";
+    const std::string DrivenJson = R"({"tim":10.428,"vel":[4.2,0.1,0.0],"rot":[-0.0001296,0.0031575,0.9899491,0.1413890],"rvel":[0,0,0],"pos":[8.72719,-0.20515,0.49695],"ping":0.033})";
+    const std::string TurnedJson = R"({"tim":10.428,"vel":[0,0,0],"rot":[0,-0.7071,0,0.7071],"rvel":[0,0,1.2],"pos":[-0.27281,-0.20515,0.49695],"ping":0.033})";
+
+    // The server hands over the complete "Zp:<pid>-<vid>:<json>" packet.
+    const auto Parked = ParseVehiclePose("Zp:0-1:" + ParkedJson);
+    const auto ParkedLater = ParseVehiclePose("Zp:0-1:" + ParkedLaterJson);
+    const auto Driven = ParseVehiclePose("Zp:0-1:" + DrivenJson);
+    const auto Turned = ParseVehiclePose("Zp:0-1:" + TurnedJson);
 
     REQUIRE(Parked.Valid);
     REQUIRE(ParkedLater.Valid);
     REQUIRE(Driven.Valid);
     REQUIRE(Turned.Valid);
 
+    // A bare JSON body still parses, so the helper stays usable on its own.
+    CHECK(ParseVehiclePose(ParkedJson).Valid);
+
     CHECK_FALSE(PoseMoved(Parked, ParkedLater));
     CHECK(PoseMoved(Parked, Driven));
     CHECK(PoseMoved(Parked, Turned));
 
     CHECK_FALSE(ParseVehiclePose("not json").Valid);
+    CHECK_FALSE(ParseVehiclePose("Zp:0-1:not json").Valid);
     CHECK_FALSE(ParseVehiclePose(R"({"tim":1})").Valid);
     CHECK_FALSE(ParseVehiclePose(R"({"pos":[1,2],"rot":[0,0,0,1]})").Valid);
 }
